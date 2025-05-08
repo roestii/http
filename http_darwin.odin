@@ -1,5 +1,7 @@
 package http
 
+// TODO(louis): What happens if the client closes the connection, we need to know that...
+
 import "core:fmt"
 import "core:net"
 import "core:mem"
@@ -93,11 +95,8 @@ main :: proc() {
                     return
                 }
 
-                if change_count >= len(kq_change_list) {
-                    // TODO(louis): Handle this properly, this is very slopy
-                    fmt.println("No slots left in the change list for the kqueue")
-                    return
-                }
+                // TODO(louis): Verify that this can never happen
+                assert(change_count < len(kq_change_list))
 
                 new_event := kqueue.KEvent {
                     uintptr(client),
@@ -110,25 +109,33 @@ main :: proc() {
                 kq_change_list[change_count] = new_event
                 change_count += 1
             } else {
+                // TODO(louis): Check whether the client closed the connection as kqueue will notify us 
+                // when the connection is closed (we should verify that as well)
                 conn_idx := u32(uintptr(kevent.udata))
                 client_conn: ^Client_Connection = &conn_pool.used[conn_idx]
-                #partial switch handle_connection(client_conn) {
-                case .Closed:
+                if .EOF in kevent.flags {
                     connection_reset(client_conn)
                     pool_release(&conn_pool, conn_idx)
-                    // TODO(louis): Make sure this works
-                    assert(change_count < len(kq_change_list))
-                    new_event := kqueue.KEvent {
-                        kevent.ident,
-                        .Read,
-                        {.Delete, .Error},
-                        {},
-                        0,
-                        nil
+                    net.close(net.TCP_Socket(kevent.ident))
+                } else {
+                    #partial switch handle_connection(client_conn) {
+                    case .Closed:
+                        connection_reset(client_conn)
+                        pool_release(&conn_pool, conn_idx)
                     }
+                    // TODO(louis): Make sure this works
+                    // assert(change_count < len(kq_change_list))
+                    // new_event := kqueue.KEvent {
+                    //     kevent.ident,
+                    //     .Read,
+                    //     {.Delete, .Error},
+                    //     {},
+                    //     0,
+                    //     nil
+                    // }
 
-                    kq_change_list[change_count] = new_event
-                    change_count += 1
+                    // kq_change_list[change_count] = new_event
+                    // change_count += 1
                 }
             }
         }
