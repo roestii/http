@@ -1,5 +1,32 @@
 package http
 
+import "base:runtime"
+
+u32_to_string :: proc(x: u32, arena: runtime.Allocator) -> (result: []u8) {
+    n := x
+    if n == 0 {
+        result = make([]u8, 1, arena)
+        result[0] = '0'
+        return
+    } 
+
+    digits: u32
+    for n > 0 {
+        digits += 1
+        n /= 10
+    }
+
+    n = x
+    result = make([]u8, digits, arena)
+    #reverse for &c in result {
+        c = u8(n % 10) + '0'
+        assert(c >= '0' && c <= '9')
+        n /= 10
+    }
+
+    return
+}
+
 string_to_u32 :: proc(input: []u8) -> (number: u32, err: bool) {
     number = 0
     for c in input {

@@ -86,6 +86,8 @@ asset_store_get :: proc(asset_store: ^Asset_Store, name: []u8) -> (result: []u8,
             result = entry.asset.content
             return
         }
+
+        entry = entry.next
     }
 
     err = true

@@ -163,15 +163,24 @@ parse_header :: proc(connection: ^Client_Connection) {
 }
 
 Connection_State :: enum {
-    Waiting,
+    KeepAlive,
     Closed
 }
 
-handle_request :: proc(connection: ^Client_Connection) {
+handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store) {
     using connection
     switch request.method {
     case .Post:
     case .Get:
+        // TODO(louis): Verify that it is not possible to have a uri of length zero
+        content, asset_not_found := asset_store_get(asset_store, request.uri[1:])
+        if !asset_not_found {
+            response.body = content
+            content_len_entry := new(Http_Header_Entry, arena)
+            content_len_entry.name = transmute([]u8)CONTENT_LENGTH_LITERAL
+            content_len_entry.value = u32_to_string(u32(len(content)), arena)
+            response.header_map.head = content_len_entry
+        }
         response.status_code = 0 
     }
 
@@ -183,15 +192,23 @@ write_response :: proc(connection: ^Client_Connection) {
     write(&writer, transmute([]u8)HTTP_VERSION_1_1_LITERAL)   
     write(&writer, u8(' '))   
     write(&writer, transmute([]u8)StatusCodes[response.status_code])
-
-    if response.body != nil {
-        write(&writer, response.body) 
+    header_entry := response.header_map.head
+    for header_entry != nil {
+        write(&writer, header_entry.name)
+        write(&writer, ": ")
+        write(&writer, header_entry.value)
+        write(&writer, CRLF)
+        header_entry = header_entry.next
     }
 
-    net.send_tcp(client_socket, writer.buffer)
+    write(&writer, CRLF)
+    net.send_tcp(client_socket, writer.buffer[:writer.offset])
+    if response.body != nil {
+        net.send_tcp(client_socket, response.body)
+    }
 }
 
-handle_connection :: proc(connection: ^Client_Connection) -> (result: Connection_State) {
+handle_connection :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store) -> (result: Connection_State) {
     using connection
     bytes_read, err := net.recv_tcp(client_socket, parser.buffer[parser.offset:])
     if err != nil {
@@ -206,19 +223,19 @@ handle_connection :: proc(connection: ^Client_Connection) -> (result: Connection
         http_parse(connection)
         switch parser.parser_state {
         case .CompleteMessage:
-            handle_request(connection)
+            handle_request(connection, asset_store)
             write_response(connection)
             assert(parser.message_length <= parser.offset)
             if parser.message_length == parser.offset {
+                connection_reset(connection)
                 break loop
             }
 
-            free_all(arena)
             memory_copy(parser.buffer, parser.buffer[parser.message_length:parser.offset])
-            length_remaining := parser.offset - parser.message_length
-            memory_set(parser.buffer[length_remaining:parser.offset], 0)
+            free_all(arena)
             parser.offset = parser.offset - parser.message_length
             request.header_map.head = nil
+            response.header_map.head = nil
             parser.prev_offset = 0
             parser.parser_state = .IncompleteHeader
             writer.offset = 0
@@ -227,7 +244,7 @@ handle_connection :: proc(connection: ^Client_Connection) -> (result: Connection
             result = .Closed
             break loop
         case .IncompleteHeader, .CompleteHeader:
-            result = .Waiting
+            result = .KeepAlive
             break loop
         }
     }

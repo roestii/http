@@ -5,6 +5,21 @@ Writer :: struct {
     offset: u32
 }
 
+write_string :: proc(writer: ^Writer, str: string) -> (err: bool) {
+    using writer
+
+    src := transmute([]u8)str
+    start := buffer[offset:]
+    if len(src) > len(start) {
+        err = true 
+        return
+    }
+
+    memory_copy(start, src)
+    offset += u32(len(src))
+    return 
+}
+
 write_memory :: proc(writer: ^Writer, src: []u8) -> (err: bool) {
     using writer
     start := buffer[offset:]
@@ -56,4 +71,4 @@ write_number :: proc(writer: ^Writer, number: u32) -> (err: bool) {
     return
 }
 
-write :: proc{write_memory, write_char, write_number}
+write :: proc{write_memory, write_char, write_number, write_string}

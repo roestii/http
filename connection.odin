@@ -26,6 +26,7 @@ connection_reset :: proc(conn: ^Client_Connection) {
     free_all(conn.arena) 
     parser.offset = 0
     parser.prev_offset = 0
+    parser.parser_state = .IncompleteHeader
     writer.offset = 0
     request.header_map.head = nil
     response.header_map.head = nil
