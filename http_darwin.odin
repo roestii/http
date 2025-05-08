@@ -42,6 +42,21 @@ main :: proc() {
         pool_init(conn_pool, CONNS_PER_THREAD, base_arena, conn_arena)
     }
 
+
+    asset_store: Asset_Store
+    asset_store_init(&asset_store, base_arena)
+
+    when ODIN_DEBUG {
+        BASE_DIR :: "assets/"
+        INDEX_NAME :: "index.html"
+        index_name := INDEX_NAME
+        index_content := #load(BASE_DIR + INDEX_NAME, []u8)
+        content, asset_found := asset_store_get(&asset_store, transmute([]u8)index_name)
+        assert(asset_found)
+        assert(memory_compare(content, index_content))
+    }
+    // TODO(louis): Remove this, this is purely for debugging purposes
+
     // TODO(louis): This code has to go to the threads
     client: net.TCP_Socket
     source: net.Endpoint

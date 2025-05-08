@@ -41,6 +41,20 @@ memory_set :: proc(buffer: []u8, value: u8) {
     }
 }
 
+
+str_len :: proc(buffer: []u8) -> (result: u32) {
+    for c, idx in buffer {
+        if c == 0 {
+            result = u32(idx)
+            return
+        }
+    }
+
+    result = u32(len(buffer))
+    return
+}
+
+
 memory_find :: proc(haystack: []u8, needle: []u8) -> (u32, bool) {
     end := len(haystack) - len(needle)
     haystackI: []u8
