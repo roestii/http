@@ -10,7 +10,7 @@ import "base:runtime"
 
 // CONSTANTS
 
-CONNS_PER_THREAD :: 128
+CONNS_PER_THREAD :: 4
 CONN_REQ_BUF_SIZE :: 2 * mem.Megabyte
 CONN_RES_BUF_SIZE :: 2 * mem.Megabyte
 CONN_SCRATCH_SIZE :: 4 * mem.Megabyte // This includes the header map as well as the output buffer for compressed content
@@ -25,63 +25,44 @@ main :: proc() {
         return
     } 
 
-    client: net.TCP_Socket
-    source: net.Endpoint
-    client, source, err = net.accept_tcp(socket)
-    if err != nil {
-        fmt.println("Unable to accept on socket: ", err)
-        return
-    }
 
     base_memory: mem.Arena
     mem.arena_init(&base_memory, make([]u8, MEMORY, context.temp_allocator))
     defer free_all()
     base_arena := mem.arena_allocator(&base_memory)
-    for i in 0..<NTHREADS {
-        // TODO(louis): Shouldn't the memory for the client connection with all of it's buffers be contiguous
-        // Right now we have a chunk of memory for all connections and then the individual buffers
-        conns := make([]Client_Connection, CONNS_PER_THREAD, base_arena)
-        // TODO(louis): Is it possible to use a pool allocator (free list allocator) without having to initialize the element 
-        // each time we acquire an item? In theory yes if we introduce more overhead, i.e. a block list
-        // pool_init(conn_base, CONNS_PER_THREAD)
+    conn_pools: [NTHREADS]Connection_Pool
+    conn_arenas: [NTHREADS]mem.Arena
+    for idx in 0..<len(conn_pools) {
+        conn_pool := &conn_pools[idx]
+        conn_arena := &conn_arenas[idx]
+        pool_init(conn_pool, CONNS_PER_THREAD, base_arena, conn_arena)
+    }
 
-        for &conn in conns {
-            using conn
-            writer.buffer = make([]u8, CONN_RES_BUF_SIZE, base_arena)
-            parser.buffer = make([]u8, CONN_REQ_BUF_SIZE, base_arena)
-            tmp_arena: mem.Arena
-            arena_base := make([]u8, CONN_SCRATCH_SIZE, base_arena)
-            mem.arena_init(&tmp_arena, arena_base)
-            arena = mem.arena_allocator(&tmp_arena)
+    // TODO(louis): This code has to go to the threads
+    client: net.TCP_Socket
+    source: net.Endpoint
+    conn_pool := conn_pools[0]
+    for {
+        client, source, err = net.accept_tcp(socket)
+        if err != nil {
+            fmt.println("Unable to accept on socket: ", err)
+            return
         }
-    }
 
-    // TODO(louis): Please fix this setup code... I want multiple threads and a connection pool
-    parser: Http_Parser
-    parser.buffer = make([]u8, 2048, context.temp_allocator)
-    writer: Writer = {
-        make([]u8, 2048, context.temp_allocator),
-        0
-    }
-    arena: mem.Arena
-    request: Http_Request
-    response: Http_Response;
-    base_ptr := make([]u8, 2048, context.temp_allocator)
-    mem.arena_init(&arena, base_ptr)
+        conn_idx, pool_err := pool_acquire(&conn_pool, client)
+        if pool_err {
+            fmt.println("No free connection slots available")
+            return
+        }
 
-    client_connection: Client_Connection = {
-        client,
-        mem.arena_allocator(&arena),
-        parser,
-        request,
-        writer,
-        response,
-    }
-
-    loop: for {
-        #partial switch handle_connection(&client_connection) {
-        case .Closed:
-            break loop
+        client_conn: ^Client_Connection = &conn_pool.used[conn_idx]
+        loop: for {
+            // TODO(louis): Probably we want the read from the socket to go here as well
+            #partial switch handle_connection(client_conn) {
+            case .Closed:
+                pool_release(&conn_pool, conn_idx)
+                break loop
+            }
         }
     }
 }

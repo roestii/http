@@ -56,15 +56,6 @@ Http_Response :: struct {
     status_code: u16,
 }
 
-Client_Connection :: struct {
-    client_socket: net.TCP_Socket,
-    arena: runtime.Allocator,
-    parser: Http_Parser,
-    request: Http_Request,
-    writer: Writer,
-    response: Http_Response
-}
-
 get_value :: proc(header_map: ^Http_Header_Map, name: []u8) -> (value: []u8, found: bool) {
     entry := header_map.head
     for entry != nil {
