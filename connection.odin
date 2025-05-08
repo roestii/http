@@ -20,6 +20,17 @@ Connection_Pool :: struct {
     used: []Client_Connection
 }
 
+connection_reset :: proc(conn: ^Client_Connection) {
+    using conn
+    // NOTE(louis): This just sets the offset of the underlying arena to zero
+    free_all(conn.arena) 
+    parser.offset = 0
+    parser.prev_offset = 0
+    writer.offset = 0
+    request.header_map.head = nil
+    response.header_map.head = nil
+}
+
 pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocator, conn_arena: ^mem.Arena) {
     using pool
     free_len = len 
