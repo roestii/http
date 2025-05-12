@@ -5,45 +5,50 @@ import "core:math/rand"
 import "base:runtime"
 import "core:mem"
 import "core:hash/xxhash"
-import core_hash "core:hash"
+import "core:hash"
 
+BUCKET_COUNT :: 128
 
-common_headers := [?][]string {
-    {"Host", "www.example.com"},
-    {"Connection", "keep-alive"}, // Or "close"
-    {"Content-Type", "application/json"}, // Or "text/html", "application/x-www-form-urlencoded", etc.
-    {"Content-Length", "123"}, // Example length
-    {"User-Agent", "Mozilla/5.0 (YourApp/1.0)"},
-    {"Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"},
-    {"Cache-Control", "no-cache"}, // Or "max-age=0"
-    {"Accept-Encoding", "gzip, deflate, br"}, // Common encodings
-    {"Accept-Language", "en-US,en;q=0.5"}, // Example languages
+Test_Header :: struct {
+    key: []u8,
+    value: []u8,
+    precomputed_idx: u64,
+}
+
+common_headers := [?]Test_Header {
+    {transmute([]u8)string("Host"), transmute([]u8)string("www.example.com"), 13416917362057783887 & (BUCKET_COUNT - 1)},
+    {transmute([]u8)string("Connection"), transmute([]u8)string("keep-alive"), 13118390000363561740 & (BUCKET_COUNT - 1)}, // Or "close"
+    {transmute([]u8)string("Content-Type"), transmute([]u8)string("application/json"), 12804758402103004436 & (BUCKET_COUNT - 1)}, // Or "text/html", "application/x-www-form-urlencoded", etc.
+    {transmute([]u8)string("Content-Length"), transmute([]u8)string("123"), 449329715466641104 & (BUCKET_COUNT - 1)}, // Example length
+    {transmute([]u8)string("User-Agent"), transmute([]u8)string("Mozilla/5.0 (YourApp/1.0)"), 15681415265888807480 & (BUCKET_COUNT - 1)},
+    {transmute([]u8)string("Accept"), transmute([]u8)string("text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"), 13352063277170595465 & (BUCKET_COUNT - 1)},
+    {transmute([]u8)string("Cache-Control"), transmute([]u8)string("no-cache"), 6683910725962449236 & (BUCKET_COUNT - 1)}, // Or "max-age=0"
+    {transmute([]u8)string("Accept-Encoding"), transmute([]u8)string("gzip, deflate, br"), 15371409845389592348 & (BUCKET_COUNT - 1)}, // Common encodings
+    {transmute([]u8)string("Accept-Language"), transmute([]u8)string("en-US,en;q=0.5"), 15894663165230168565 & (BUCKET_COUNT - 1)}, // Example languages
 };
-
 // Less Common Headers (randomly include these for varied test cases)
-less_common_headers := [?][]string {
-    {"Referer", "https://www.example.com/previous-page"}, // Note the common misspelling "Referer"
-    {"Cookie", "sessionid=abcde12345; csrftoken=FGHJK67890"}, // Example cookies
-    {"Authorization", "Bearer your_token_here"}, // Example auth token
-    {"If-Modified-Since", "Tue, 15 Nov 2022 12:00:00 GMT"}, // Example date
-    {"If-None-Match", "\"abcdef123456\""}, // Example ETag value
-    {"X-Requested-With", "XMLHttpRequest"}, // Common for AJAX requests
-    {"DNT", "1"}, // Do Not Track
-    {"Upgrade-Insecure-Requests", "1"},
-    {"Via", "1.1 proxy-server"}, // Example proxy
-    {"Server", "YourWebServer/1.0"}, // Example server name (often in responses)
-    {"ETag", "\"abcdef123456\""}, // Example ETag (often in responses)
-    {"Expires", "Tue, 15 Nov 2023 12:00:00 GMT"}, // Example expiration date (often in responses)
-    {"Pragma", "no-cache"}, // Older cache control (often in responses)
-    {"Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload"}, // HSTS
-    {"Content-Security-Policy", "default-src 'self'"}, // CSP
-    {"X-Content-Type-Options", "nosniff"}, // Security header
-    {"X-Frame-Options", "DENY"}, // Security header
-    {"X-XSS-Protection", "1; mode=block"}, // Security header
-    {"Access-Control-Allow-Origin", "*"}, // CORS header (often in responses)
-    {"X-Forwarded-For", "192.168.1.100"}, // Client IP behind a proxy
-    {"X-Api-Key", "your_api_key"}, // Example custom header
-    {"Correlation-ID", "a1b2c3d4e5f6"}, // Example tracing header
+less_common_headers := [?]Test_Header {
+    {transmute([]u8)string("Referer"), transmute([]u8)string("https://www.example.com/previous-page"), 11861277726012033922 & (BUCKET_COUNT - 1)}, // Note the common misspelling "Referer"
+    {transmute([]u8)string("Cookie"), transmute([]u8)string("sessionid=abcde12345; csrftoken=FGHJK67890"), 13696674242553187990 & (BUCKET_COUNT - 1)}, // Example cookies
+    {transmute([]u8)string("Authorization"), transmute([]u8)string("Bearer your_token_here"), 8784672000562863350 & (BUCKET_COUNT - 1)}, // Example auth token
+    {transmute([]u8)string("If-Modified-Since"), transmute([]u8)string("Tue, 15 Nov 2022 12:00:00 GMT"), 4657765253307276538 & (BUCKET_COUNT - 1)}, // Example date
+    {transmute([]u8)string("If-None-Match"), transmute([]u8)string("\"abcdef123456\""), 18376419898620002833 & (BUCKET_COUNT - 1)}, // Example ETag value
+    {transmute([]u8)string("X-Requested-With"), transmute([]u8)string("XMLHttpRequest"), 3660188399589234597 & (BUCKET_COUNT - 1)}, // Common for AJAX requests
+    {transmute([]u8)string("DNT"), transmute([]u8)string("1"), 18226642915552992130 & (BUCKET_COUNT - 1)}, // Do Not Track
+    {transmute([]u8)string("Upgrade-Insecure-Requests"), transmute([]u8)string("1"), 9932066763065563196 & (BUCKET_COUNT - 1)},
+    {transmute([]u8)string("Via"), transmute([]u8)string("1.1 proxy-server"), 10395304764522445740 & (BUCKET_COUNT - 1)}, // Example proxy
+    {transmute([]u8)string("Server"), transmute([]u8)string("YourWebServer/1.0"), 11499086243070896108 & (BUCKET_COUNT - 1)}, // Example server name (often in responses)
+    {transmute([]u8)string("ETag"), transmute([]u8)string("\"abcdef123456\""), 17802453777123907757 & (BUCKET_COUNT - 1)}, // Example ETag (often in responses)
+    {transmute([]u8)string("Expires"), transmute([]u8)string("Tue, 15 Nov 2023 12:00:00 GMT"), 14251010686742252949 & (BUCKET_COUNT - 1)}, // Example expiration date (often in responses)
+    {transmute([]u8)string("Pragma"), transmute([]u8)string("no-cache"), 512424240408842492 & (BUCKET_COUNT - 1)}, // Older cache control (often in responses)
+    {transmute([]u8)string("Strict-Transport-Security"), transmute([]u8)string("max-age=31536000; includeSubDomains; preload"), 5236953830423320535 & (BUCKET_COUNT - 1)}, // HSTS
+    {transmute([]u8)string("Content-Security-Policy"), transmute([]u8)string("default-src 'self'"), 12093386995647260114 & (BUCKET_COUNT - 1)}, // CSP
+    {transmute([]u8)string("X-Content-Type-Options"), transmute([]u8)string("nosniff"), 11732346818424412208 & (BUCKET_COUNT - 1)}, // Security header {"X-Frame-Options", "DENY", 4313135796493096389}, // Security header
+    {transmute([]u8)string("X-XSS-Protection"), transmute([]u8)string("1; mode=block"), 837297764874094624 & (BUCKET_COUNT - 1)}, // Security header
+    {transmute([]u8)string("Access-Control-Allow-Origin"), transmute([]u8)string("*"), 18203170181510824321 & (BUCKET_COUNT - 1)}, // CORS header (often in responses)
+    {transmute([]u8)string("X-Forwarded-For"), transmute([]u8)string("192.168.1.100"), 6416270139725299187 & (BUCKET_COUNT - 1)}, // Client IP behind a proxy
+    {transmute([]u8)string("X-Api-Key"), transmute([]u8)string("your_api_key"), 16070554342849164953 & (BUCKET_COUNT - 1)}, // Example custom header
+    {transmute([]u8)string("Correlation-ID"), transmute([]u8)string("a1b2c3d4e5f6"), 9165641619253713877 & (BUCKET_COUNT - 1)}, // Example tracing header
 };
 
 memory_compare :: proc(a: []u8, b: []u8) -> (result: bool) {
@@ -128,21 +133,22 @@ array_get :: proc(header_map: ^Http_Header_Map_Array, key: []u8) -> (result: []u
     return
 }
 
+
 Http_Header_Map_Hash :: struct {
     buckets: []Http_Header_Entry,
     count: u32
 }
 
-hash_init :: proc(header_map: ^Http_Header_Map_Hash, size: u32, arena: runtime.Allocator) {
-    header_map.buckets = make([]Http_Header_Entry, size, arena)
+hash_init :: proc(header_map: ^Http_Header_Map_Hash, arena: runtime.Allocator) {
+    header_map.buckets = make([]Http_Header_Entry, BUCKET_COUNT, arena)
 }
 
 hash_insert :: proc(header_map: ^Http_Header_Map_Hash, key: []u8, value: []u8) {
     using header_map
     // TODO(louis): Check the length and return an error if the map is full
-    digest := xxhash.XXH32(key)
+    digest := xxhash.XXH3_64_default(key)
     for idx := 0; idx < len(buckets); idx += 1 {
-        key_idx := (digest + u32(idx)) % u32(len(buckets))
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
         field := &buckets[key_idx]
         if field.key == nil {
             field^ = { key, value }
@@ -157,13 +163,36 @@ hash_clear :: proc(header_map: ^Http_Header_Map_Hash) {
     }
 }
 
+hash_get_precomputed :: proc(
+    header_map: ^Http_Header_Map_Hash, 
+    key: []u8, 
+    digest: u64
+) -> (result: []u8, err: bool) {
+    using header_map
+
+    for idx := 0; idx < len(buckets); idx += 1 {
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
+        field := buckets[key_idx]
+        if field.key == nil {
+            err = true
+            return
+        }
+
+        if memory_compare(key, field.key) {
+            result = field.value
+            return
+        }
+    }
+
+    err = true
+    return
+}
+
 hash_get :: proc(header_map: ^Http_Header_Map_Hash, key: []u8) -> (result: []u8, err: bool) {
     using header_map
-    digest := xxhash.XXH32(key)
-    defer count += 1
-    
+    digest := xxhash.XXH3_64_default(key)
     for idx := 0; idx < len(buckets); idx += 1 {
-        key_idx := (digest + u32(idx)) % u32(len(buckets))
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
         field := buckets[key_idx]
         if field.key == nil {
             err = true
@@ -184,27 +213,29 @@ MESSAGE_COUNT :: 100000
 TIME_TO_TRY :: 10
 
 Http_Message :: struct {
-    fields: []Http_Header_Entry
+    fields: []Test_Header
 }
 
 init_messages :: proc(messages: []Http_Message) -> (result: u64) {
+    unused_fields := make([]u32, len(less_common_headers), context.temp_allocator)
     for &msg in messages {
+        unused_field_count := len(unused_fields)
+        for &unused_field, idx in unused_fields {
+            unused_field = u32(idx)
+        }
         // TODO(louis): Maybe initialize the distribution and not draw from the rng
         random_field_count := rand.int_max(len(less_common_headers))
-        msg.fields = make([]Http_Header_Entry, len(common_headers) + random_field_count, context.temp_allocator)
-
+        msg.fields = make([]Test_Header, len(common_headers)+random_field_count, context.temp_allocator)
         for idx in 0..<len(common_headers) {
             field := &msg.fields[idx]
-            field.key = transmute([]u8)common_headers[idx][0]
-            field.value = transmute([]u8)common_headers[idx][1]
+            field^ = common_headers[idx]
         }
-
         for idx in 0..<random_field_count {
             field := &msg.fields[len(common_headers)+idx]
-            // TODO(louis): Make it such that headers are not chosen two times
-            header := rand.choice(less_common_headers[:])
-            field.key = transmute([]u8)header[0]
-            field.value = transmute([]u8)header[1]
+            field_idx := rand.choice(unused_fields[:unused_field_count])
+            field^ = less_common_headers[field_idx]
+            unused_field_count -= 1
+            unused_fields[field_idx] = unused_fields[unused_field_count]
         }
 
         result += u64(len(common_headers)) + u64(random_field_count)
@@ -257,7 +288,7 @@ main :: proc() {
                 array_insert(&array_map, field.key, field.value)
             }
 
-            #reverse for field in msg.fields {
+            for field in msg.fields {
                 // TODO(louis): Maybe we have to do something with the value in order to 
                 // not get it optimized away
                 value, err := array_get(&array_map, field.key)
@@ -278,7 +309,7 @@ main :: proc() {
     hash_tester: Repitition_Tester
     tester_init(&hash_tester, TIME_TO_TRY, "Hash Header Map")
     hash_map: Http_Header_Map_Hash
-    hash_init(&hash_map, 503, arena_alloc)
+    hash_init(&hash_map, arena_alloc)
 
     for tester_is_testing(&hash_tester) {
         tester_begin_time(&hash_tester)
@@ -287,10 +318,10 @@ main :: proc() {
                 hash_insert(&hash_map, field.key, field.value)
             }
 
-            #reverse for field in msg.fields {
+            for field in msg.fields {
                 // TODO(louis): Maybe we have to do something with the value in order to 
                 // not get it optimized away
-                value, err := hash_get(&hash_map, field.key)
+                value, err := hash_get_precomputed(&hash_map, field.key, field.precomputed_idx)
                 assert(!err)
             }
 
