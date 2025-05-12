@@ -30,6 +30,7 @@ connection_reset :: proc(conn: ^Client_Connection) {
     writer.offset = 0
     request.header_map.head = nil
     response.header_map.head = nil
+    response.body = nil
 }
 
 pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocator, conn_arena: ^mem.Arena) {

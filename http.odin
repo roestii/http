@@ -13,6 +13,31 @@ Http_Header_Entry :: struct {
     next: ^Http_Header_Entry
 }
 
+Status_Code :: bit_field u16 {
+    offset: u8 | 8,
+    type: u8 | 8
+}
+
+Http_Status_Code :: enum u16 {
+    Continue = 1 << 8,
+    Switching_Protocols = 1 << 8 | 1,
+    OK = 2 << 8,
+    Created = 2 << 8 | 1,
+    Accepted = 2 << 8 | 2,
+    Multiple_Choices = 3 << 8,
+    Moved_Permanently = 3 << 8 | 1,
+    Found = 3 << 8 | 2,
+    Bad_Request = 4 << 8,
+    Unauthorized = 4 << 8 | 1,
+    Payment_Required = 4 << 8 | 2,
+    Forbidden = 4 << 8 | 3,
+    Not_Found = 4 << 8 | 4,
+    Internal_Server_Error = 5 << 8,
+    Not_Implemented = 5 << 8 | 1,
+    Bad_Gateway = 5 << 8 | 2,
+    Service_Unavailable = 5 << 8 | 3
+}
+
 Http_Header_Map :: struct {
     head: ^Http_Header_Entry
 }
@@ -53,7 +78,7 @@ Http_Parser :: struct {
 Http_Response :: struct {
     header_map: Http_Header_Map,  
     body: []u8,
-    status_code: u16,
+    status_code: Http_Status_Code,
 }
 
 get_value :: proc(header_map: ^Http_Header_Map, name: []u8) -> (value: []u8, found: bool) {
@@ -180,8 +205,19 @@ handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store
             content_len_entry.name = transmute([]u8)CONTENT_LENGTH_LITERAL
             content_len_entry.value = u32_to_string(u32(len(content)), arena)
             response.header_map.head = content_len_entry
+            response.status_code = .OK
+        } else {
+            response.status_code = .Not_Found
+            connection_entry := new(Http_Header_Entry, arena)
+            connection_entry.name = transmute([]u8)CONNECTION_LITERAL
+            connection_entry.value = transmute([]u8)CLOSE_LITERAL
+            content_len_entry := new(Http_Header_Entry, arena)
+            content_len_entry.name = transmute([]u8)CONTENT_LENGTH_LITERAL
+            content_len_entry.value = transmute([]u8)ZERO_LITERAL
+            content_len_entry.next = connection_entry
+            response.header_map.head = content_len_entry
+            // TODO(louis): We should probably consider reporting back that we should close the connection
         }
-        response.status_code = 0 
     }
 
     return
@@ -191,7 +227,8 @@ write_response :: proc(connection: ^Client_Connection) {
     using connection
     write(&writer, transmute([]u8)HTTP_VERSION_1_1_LITERAL)   
     write(&writer, u8(' '))   
-    write(&writer, transmute([]u8)StatusCodes[response.status_code])
+    status_code := lookup_status_code(response.status_code)
+    write(&writer, transmute([]u8)status_code)
     header_entry := response.header_map.head
     for header_entry != nil {
         write(&writer, header_entry.name)
@@ -225,12 +262,14 @@ handle_connection :: proc(connection: ^Client_Connection, asset_store: ^Asset_St
         case .CompleteMessage:
             handle_request(connection, asset_store)
             write_response(connection)
+            // TODO(louis): Improve detection of complete messages
             assert(parser.message_length <= parser.offset)
             if parser.message_length == parser.offset {
                 connection_reset(connection)
                 break loop
             }
 
+            // TODO(louis): Refactor this into a connection reset with offset
             memory_copy(parser.buffer, parser.buffer[parser.message_length:parser.offset])
             free_all(arena)
             parser.offset = parser.offset - parser.message_length
@@ -256,6 +295,7 @@ http_parse :: proc(connection: ^Client_Connection) {
     using connection.parser
     if parser_state == .IncompleteHeader {
         found_crlf_2x: bool
+        corrected_offset := prev_offset if prev_offset < u32(len(CRLF_2x) - 1) else prev_offset - u32(len(CRLF_2x) - 1)
         header_end, found_crlf_2x = memory_find(buffer[prev_offset:offset], transmute([]u8)CRLF_2x)
         header_end += u32(len(CRLF))
         if found_crlf_2x {

@@ -23,6 +23,7 @@ NTHREADS :: 6
 MEMORY : u64 : NTHREADS * CONNS_PER_THREAD * MEM_PER_CONN
 
 main :: proc() {
+    input := [?]u8{0, 1, 2, 3, 4}
     socket, err := init_socket()
     if err != nil {
         fmt.eprintln("Unable to init socket: ", err)
