@@ -3,6 +3,15 @@ package http
 import "base:runtime"
 import "core:net"
 import "core:mem"
+import "core:fmt"
+
+CONNS_PER_THREAD :: 128
+CONN_REQ_BUF_SIZE :: 2 * mem.Megabyte
+CONN_RES_BUF_SIZE :: 2 * mem.Megabyte
+CONN_SCRATCH_SIZE :: 4 * mem.Megabyte // This includes the header map as well as the output buffer for compressed content
+MEM_PER_CONN :: size_of(Client_Connection) + CONN_REQ_BUF_SIZE + CONN_RES_BUF_SIZE + CONN_SCRATCH_SIZE
+NTHREADS :: 6
+MEMORY : u64 : NTHREADS * CONNS_PER_THREAD * MEM_PER_CONN
 
 Client_Connection :: struct {
     client_socket: net.TCP_Socket,
@@ -63,32 +72,36 @@ pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocato
 }
 
 pool_acquire :: proc(pool: ^Connection_Pool, client_socket: net.TCP_Socket) -> (idx: u32, err: bool) {
-    using pool
-    if free_len == 0 {
+    if pool.free_len == 0 {
         err = true
         return
     }
 
-    free_len -= 1
-    conn := free[free_len]
+    pool.free_len -= 1
+    conn := pool.free[pool.free_len]
     conn.client_socket = client_socket
-    used[used_len] = conn
-    idx = used_len
-    used_len += 1
+    pool.used[pool.used_len] = conn
+    idx = pool.used_len
+    pool.used_len += 1
+    when ODIN_DEBUG {
+        fmt.println("Acquiring ", idx)
+    }
     return
 }
 
-pool_release :: proc(pool: ^Connection_Pool, idx: u32) {
-    using pool
-    assert(used_len > 0)
-    conn := used[idx]
-    free[free_len] = conn
+pool_release :: proc(pool: ^Connection_Pool, idx: u32, loc := #caller_location) {
+    when ODIN_DEBUG {
+        fmt.printfln("Releasing connection %d from {:v}", idx, loc)
+    }
+    assert(pool.used_len > 0)
+    conn := pool.used[idx]
+    pool.free[pool.free_len] = conn
 
-    if idx < used_len - 1 {
-        last := used[used_len - 1]
-        used[idx] = last 
+    if idx < pool.used_len - 1 {
+        last := pool.used[pool.used_len - 1]
+        pool.used[idx] = last 
     }
 
-    free_len += 1
-    used_len -= 1
+    pool.free_len += 1
+    pool.used_len -= 1
 }

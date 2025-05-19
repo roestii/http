@@ -1,16 +1,10 @@
 package http
-
-// TODO(louis): What happens if the client closes the connection, we need to know that...
-
 import "core:fmt"
-import "core:net"
+import "core:sys/linux"
 import "core:mem"
-import "core:sys/kqueue"
-import "base:runtime"
-import "core:sys/posix"
+import "core:net"
 
-// TODO(louis): Shoudld we have the main function in the platform-specific code or the platform-agnostic code 
-// and call into the platform-specific code when needed
+NEGATIVE_ONE_U32 :: transmute(u32)i32(-1)
 
 main :: proc() {
     socket, err := init_socket()
@@ -33,7 +27,11 @@ main :: proc() {
     }
 
     asset_store: Asset_Store
-    asset_store_init(&asset_store, base_arena)
+    asset_store_err := asset_store_init(&asset_store, base_arena)
+    if asset_store_err {
+        fmt.eprintln("Cannot initialize static asset store.")
+        return
+    }
     // when ODIN_DEBUG {
     //     BASE_DIR :: "assets/"
     //     INDEX_NAME :: "index.html"
@@ -52,35 +50,34 @@ main :: proc() {
 
     // TODO(louis): Proper error handling here as well as in the 
     // http parser
-    kq_fd, errno := kqueue.kqueue()
+    efd, errno := linux.epoll_create1({})
     if errno != .NONE {
-        fmt.eprintln("Cannot create kernel queue")
+        fmt.eprintln("Cannot create epoll.")
+        return
     }
 
-    KEVENT_LIST_LEN :: 16
-    kq_change_list: [KEVENT_LIST_LEN]kqueue.KEvent
-    kq_event_list: [KEVENT_LIST_LEN]kqueue.KEvent
-    server_event := kqueue.KEvent {
-        uintptr(socket),
-        .Read,
-        {.Add, .Error},
-        {},
-        0,
-        nil
+    server_event := linux.EPoll_Event {
+        { .IN },
+        { u32 = NEGATIVE_ONE_U32 }
+    }
+    errno = linux.epoll_ctl(efd, .ADD, linux.Fd(socket), &server_event)
+    if errno != .NONE {
+        fmt.eprintln("Cannot add server socket to epoll.")
+        return
     }
 
-    kq_change_list[0] = server_event
-    change_count := 1
+    MAX_EVENT_COUNT :: 16
+    events: [MAX_EVENT_COUNT]linux.EPoll_Event
     for {
-        event_count, kq_errno := kqueue.kevent(kq_fd, kq_change_list[:change_count], kq_event_list[:], nil)
-        if kq_errno != .NONE {
-            fmt.eprintln("Error while polling on kqueue")
+        event_count, epoll_err := linux.epoll_wait(efd, raw_data(events[:]), MAX_EVENT_COUNT, -1)
+        if epoll_err != .NONE {
+            fmt.eprintln("Error while polling on epoll")
             return
         }
-        change_count = 0
+
         for event_idx in 0..<event_count {
-            kevent := kq_event_list[event_idx]
-            if kevent.ident == uintptr(socket) {
+            event := events[event_idx]
+            if event.data.u32 == NEGATIVE_ONE_U32 {
                 client, source, err = net.accept_tcp(socket)
                 if err != nil {
                     fmt.eprintln("Error while accepting")
@@ -98,37 +95,56 @@ main :: proc() {
                     return
                 }
 
-                // TODO(louis): Verify that this can never happen
-                assert(change_count < len(kq_change_list))
-
-                new_event := kqueue.KEvent {
-                    uintptr(client),
-                    .Read,
-                    {.Add, .Error},
-                    {},
-                    0,
-                    rawptr(uintptr(conn_idx))
+                new_event := linux.EPoll_Event {
+                    { .IN },
+                    { u32 = conn_idx }
                 }
-                kq_change_list[change_count] = new_event
-                change_count += 1
+                // TODO(louis): Handle the error here
+                errno = linux.epoll_ctl(efd, .ADD, linux.Fd(client), &new_event)
+                if errno != .NONE {
+                    fmt.eprintln("Error while adding client connection to epoll.")
+                    return
+                }
+
             } else {
                 // TODO(louis): Check whether the client closed the connection as kqueue will notify us 
                 // when the connection is closed (we should verify that as well)
-                conn_idx := u32(uintptr(kevent.udata))
+
+                // TODO(louis): Somehow we free the connection multiple times, that should not happen...
+                // Something is really broken, test this further...
+                conn_idx := event.data.u32
                 client_conn: ^Client_Connection = &conn_pool.used[conn_idx]
-                if .EOF in kevent.flags {
+                if .HUP in event.events || .ERR in event.events {
+                    net.close(net.TCP_Socket(client_conn.client_socket))
                     connection_reset(client_conn)
                     pool_release(&conn_pool, conn_idx)
-                    net.close(net.TCP_Socket(kevent.ident))
                 } else {
+                    // TODO(louis): Verify that reading into a buffer with size zero returns no error,
+                    // because we rely on that fact to handle the corresponding response in the 
+                    // platform-agnostic code, i.e. http.odin
                     bytes_read, err := net.recv_tcp(client_conn.client_socket, client_conn.parser.buffer[client_conn.parser.offset:])
                     if err != nil {
+                        epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(client_conn.client_socket), nil)
+                        if epoll_err != .NONE {
+                            fmt.eprintln("Cannot remove client socket from epoll.")
+                            // TODO(louis): We should not return here, probably
+                            return
+                        }
                         net.close(client_conn.client_socket)
                         connection_reset(client_conn)
                         pool_release(&conn_pool, conn_idx)
                     } else {
+                        client_conn.parser.prev_offset = client_conn.parser.offset
+                        client_conn.parser.offset += u32(bytes_read)
                         #partial switch handle_connection(client_conn, &asset_store) {
                         case .Close:
+                            epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(client_conn.client_socket), nil)
+                            if epoll_err != .NONE {
+                                fmt.eprintln("Cannot remove client socket from epoll.")
+                                // TODO(louis): We should not return here, probably
+                                return
+                            }
+
                             net.close(client_conn.client_socket)
                             connection_reset(client_conn)
                             pool_release(&conn_pool, conn_idx)
@@ -151,3 +167,4 @@ init_socket :: proc() -> (socket: net.TCP_Socket, err: net.Network_Error) {
     socket = net.listen_tcp(endpoint) or_return
     return
 }
+

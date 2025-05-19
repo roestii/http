@@ -276,7 +276,7 @@ parse_header :: proc(connection: ^Client_Connection) {
 
 Connection_State :: enum {
     KeepAlive,
-    Closed
+    Close
 }
 
 handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store) {
@@ -345,59 +345,48 @@ write_response :: proc(connection: ^Client_Connection) {
     }
 }
 
-handle_connection :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store) -> (result: Connection_State) {
-    using connection
-    if parser.offset == u32(len(parser.buffer) - 1) {
-        response.status_code = .Request_Entity_Too_Large
+handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -> (result: Connection_State) {
+    if conn.parser.prev_offset == conn.parser.offset {
+        // NOTE(louis): This means nothing was read into the buffer indicating that it is full
+        conn.response.status_code = .Request_Entity_Too_Large
         err := header_map_insert_precomputed(
-            &response.header_map, 
+            &conn.response.header_map, 
             CONNECTION_LITERAL, 
             CLOSE_LITERAL, 
-            CONNECTION_HASH
+            CONNECTION_HASH 
         )
         assert(!err)
-        write_response(connection)
-        net.close(client_socket)
-        result = .Closed
+        write_response(conn)
+        result = .Close
         return
     }
 
-    bytes_read, err := net.recv_tcp(client_socket, parser.buffer[parser.offset:])
-    if err != nil {
-        net.close(client_socket)
-        result = .Closed
-        return
-    }
-
-    parser.prev_offset = parser.offset
-    parser.offset += u32(bytes_read)
     loop: for {
-        http_parse(connection)
-        switch parser.parser_state {
+        http_parse(conn)
+        switch conn.parser.parser_state {
         case .CompleteMessage:
-            handle_request(connection, asset_store)
-            write_response(connection)
+            handle_request(conn, asset_store)
+            write_response(conn)
             // TODO(louis): Improve detection of complete messages
-            if parser.message_length == parser.offset {
-                connection_reset(connection)
+            if conn.parser.message_length == conn.parser.offset {
+                connection_reset(conn)
                 break loop
             }
 
-            assert(parser.message_length > parser.offset)
-            memory_copy(parser.buffer, parser.buffer[parser.message_length:parser.offset])
-            connection_reset_with_offset(connection, parser.offset - parser.message_length)
+            assert(conn.parser.message_length > conn.parser.offset)
+            memory_copy(conn.parser.buffer, conn.parser.buffer[conn.parser.message_length:conn.parser.offset])
+            connection_reset_with_offset(conn, conn.parser.offset - conn.parser.message_length)
         case .Error:
-            connection.response.status_code = .Bad_Request
+            conn.response.status_code = .Bad_Request
             header_map_insert_precomputed(
-                &connection.response.header_map, 
+                &conn.response.header_map, 
                 CONNECTION_LITERAL, 
                 CLOSE_LITERAL, 
                 CONNECTION_HASH
             )
-            write_response(connection)
-            // TODO(louis): Where should we close our connection?
-            net.close(connection.client_socket)
-            result = .Closed
+            write_response(conn)
+            // TODO(louis): Where should we close our conn?
+            result = .Close
             break loop
         case .IncompleteHeader, .CompleteHeader:
             result = .KeepAlive
@@ -408,37 +397,36 @@ handle_connection :: proc(connection: ^Client_Connection, asset_store: ^Asset_St
     return
 }
 
-http_parse :: proc(connection: ^Client_Connection) {
-    using connection.parser
-    if parser_state == .IncompleteHeader {
+http_parse :: proc(conn: ^Client_Connection) {
+    if conn.parser.parser_state == .IncompleteHeader {
         found_crlf_2x: bool
-        corrected_offset := prev_offset if prev_offset < u32(len(CRLF_2x) - 1) else prev_offset - u32(len(CRLF_2x) - 1)
-        header_end, found_crlf_2x = memory_find(buffer[prev_offset:offset], transmute([]u8)CRLF_2x)
-        header_end += u32(len(CRLF))
+        corrected_offset := conn.parser.prev_offset if conn.parser.prev_offset < u32(len(CRLF_2x) - 1) else conn.parser.prev_offset - u32(len(CRLF_2x) - 1)
+        conn.parser.header_end, found_crlf_2x = memory_find(conn.parser.buffer[conn.parser.prev_offset:conn.parser.offset], CRLF_2x)
+        conn.parser.header_end += u32(len(CRLF))
         if found_crlf_2x {
-            parse_header(connection)
+            parse_header(conn)
         }
     }
 
-    if parser_state == .CompleteHeader {
-        content_length_str, cl_err := header_map_get_precomputed(&connection.request.header_map, CONTENT_LENGTH_LITERAL, CONTENT_LENGTH_HASH)
-        header_length := header_end + u32(len(CRLF))
+    if conn.parser.parser_state == .CompleteHeader {
+        content_length_str, cl_err := header_map_get_precomputed(&conn.request.header_map, CONTENT_LENGTH_LITERAL, CONTENT_LENGTH_HASH)
+        header_length := conn.parser.header_end + u32(len(CRLF))
         if cl_err {
-            message_length = header_length
-            parser_state = .CompleteMessage
+            conn.parser.message_length = header_length
+            conn.parser.parser_state = .CompleteMessage
         } else {
             content_length, err := string_to_u32(content_length_str)
             if err {
-                parser_state = .Error
+                conn.parser.parser_state = .Error
                 return
             }
 
-            message_length = header_length + content_length
-            if message_length > offset {
-                parser_state = .Error
+            conn.parser.message_length = header_length + content_length
+            if conn.parser.message_length > conn.parser.offset {
+                conn.parser.parser_state = .Error
             } else {
-                parser_state = .CompleteMessage
-                connection.request.body = buffer[header_length:message_length]
+                conn.parser.parser_state = .CompleteMessage
+                conn.request.body = conn.parser.buffer[header_length:conn.parser.message_length]
             }
         }
     }

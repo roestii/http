@@ -52,6 +52,11 @@ asset_store_init :: proc(asset_store: ^Asset_Store, arena: runtime.Allocator) ->
 
     assets = make([]Asset, ASSET_COUNT, arena)
     asset_base_dir := opendir(ASSET_BASE_DIR)
+    if asset_base_dir == nil {
+        err = true
+        return
+    }
+
     entry := readdir(asset_base_dir)
     path_buf: [size_of(entry.d_name) + len(ASSET_BASE_DIR) + 1]u8
     asset_base_path: string = ASSET_BASE_DIR
