@@ -7,24 +7,50 @@ import "core:slice"
 
 ASSET_BASE_DIR :: "assets"
 
+ASSET_COUNT :: 128
+
 // TODO(louis): Make this a hash map at some point
 Asset :: struct {
     name: []u8,
     content: []u8
 }
 
-Asset_Store_Item :: struct {
-    asset: Asset,
-    next: ^Asset_Store_Item
+Asset_Store :: struct {
+    assets: []Asset,
+    count: u32
 }
 
-Asset_Store :: struct {
-    head: ^Asset_Store_Item
+asset_store_insert :: proc(asset_store: ^Asset_Store, name: []u8, content: []u8) -> (err: bool) {
+    using asset_store
+    if count == u32(len(assets)) {
+        err = true 
+        return
+    }
+
+    assets[count] = { name, content }
+    count += 1
+    return
+}
+
+asset_store_get :: proc(asset_store: ^Asset_Store, name: []u8) -> (result: []u8, err: bool) {
+    using asset_store
+    for asset in assets {
+        if asset.name != nil && memory_compare(asset.name, name) {
+            result = asset.content
+            return
+        }
+    }
+
+    err = true
+    return
 }
 
 asset_store_init :: proc(asset_store: ^Asset_Store, arena: runtime.Allocator) -> (err: bool) {
     // TODO(louis): Shouldn't this be in the platform-specific code?
     using posix
+    using asset_store
+
+    assets = make([]Asset, ASSET_COUNT, arena)
     asset_base_dir := opendir(ASSET_BASE_DIR)
     entry := readdir(asset_base_dir)
     path_buf: [size_of(entry.d_name) + len(ASSET_BASE_DIR) + 1]u8
@@ -54,42 +80,22 @@ asset_store_init :: proc(asset_store: ^Asset_Store, arena: runtime.Allocator) ->
                 return
             }
 
-            base_ptr := make([]u8, asset_stat.st_size, arena)
-            bytes_read := read(asset_fd, slice.as_ptr(base_ptr), len(base_ptr))
+            content := make([]u8, asset_stat.st_size, arena)
+            bytes_read := read(asset_fd, slice.as_ptr(content), len(content))
             if bytes_read < 0 {
                 fmt.eprintln("Cannot read from asset file")
                 err := true
                 return
             }
 
-            asset_store_item := new(Asset_Store_Item, arena)
             name_len := str_len(entry.d_name[:])
-            asset_store_item.asset.name = make([]u8, name_len, arena)
-            memory_copy(asset_store_item.asset.name, entry.d_name[:name_len])
-            asset_store_item.asset.content = base_ptr
-            tmp := asset_store.head
-            asset_store_item.next = tmp
-            asset_store.head = asset_store_item
+            name := make([]u8, name_len, arena)
+            memory_copy(name, entry.d_name[:name_len])
+            asset_store_insert(asset_store, name, content)
         }
 
         entry = readdir(asset_base_dir)
     }
 
-    return
-}
-
-asset_store_get :: proc(asset_store: ^Asset_Store, name: []u8) -> (result: []u8, err: bool) {
-    // TODO(louis): Make this a hash map in the future
-    entry := asset_store.head
-    for entry != nil {
-        if memory_compare(entry.asset.name, name) {
-            result = entry.asset.content
-            return
-        }
-
-        entry = entry.next
-    }
-
-    err = true
     return
 }

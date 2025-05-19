@@ -20,6 +20,18 @@ Connection_Pool :: struct {
     used: []Client_Connection
 }
 
+connection_reset_with_offset :: proc(conn: ^Client_Connection, offset: u32) {
+    using conn
+    // NOTE(louis): This just sets the offset of the underlying arena to zero
+    free_all(conn.arena) 
+    parser.offset = offset
+    parser.prev_offset = 0
+    parser.parser_state = .IncompleteHeader
+    writer.offset = 0
+    header_map_reset(&conn.request.header_map)
+    header_map_reset(&conn.response.header_map)
+}
+
 connection_reset :: proc(conn: ^Client_Connection) {
     using conn
     // NOTE(louis): This just sets the offset of the underlying arena to zero
@@ -28,9 +40,8 @@ connection_reset :: proc(conn: ^Client_Connection) {
     parser.prev_offset = 0
     parser.parser_state = .IncompleteHeader
     writer.offset = 0
-    request.header_map.head = nil
-    response.header_map.head = nil
-    response.body = nil
+    header_map_reset(&conn.request.header_map)
+    header_map_reset(&conn.response.header_map)
 }
 
 pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocator, conn_arena: ^mem.Arena) {
@@ -44,6 +55,8 @@ pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocato
         using conn
         writer.buffer = make([]u8, CONN_RES_BUF_SIZE, base_arena)
         parser.buffer = make([]u8, CONN_REQ_BUF_SIZE, base_arena)
+        header_map_init(&conn.request.header_map, base_arena)
+        header_map_init(&conn.response.header_map, base_arena)
         mem.arena_init(conn_arena, make([]u8, CONN_SCRATCH_SIZE, base_arena))
         arena = mem.arena_allocator(conn_arena)
     }

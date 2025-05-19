@@ -5,12 +5,22 @@ import "core:net"
 import "core:fmt"
 import "core:mem"
 import "base:runtime"
+import "core:hash/xxhash"
 
 // TODO(louis): Maybe implement this as a hashmap in the future 
+
+BUCKET_COUNT :: 128
+
 Http_Header_Entry :: struct {
+    // TODO(louis): We might want to have the key directly stored in the header
     name: []u8 `fmt:"s"`,
     value: []u8 `fmt:"s"`,
     next: ^Http_Header_Entry
+}
+
+Http_Header_Map :: struct {
+    buckets: []Http_Header_Entry,
+    count: u32
 }
 
 Status_Code :: bit_field u16 {
@@ -32,14 +42,11 @@ Http_Status_Code :: enum u16 {
     Payment_Required = 4 << 8 | 2,
     Forbidden = 4 << 8 | 3,
     Not_Found = 4 << 8 | 4,
+    Request_Entity_Too_Large = 4 << 8 | 13,
     Internal_Server_Error = 5 << 8,
     Not_Implemented = 5 << 8 | 1,
     Bad_Gateway = 5 << 8 | 2,
     Service_Unavailable = 5 << 8 | 3
-}
-
-Http_Header_Map :: struct {
-    head: ^Http_Header_Entry
 }
 
 Http_Method :: enum {
@@ -81,20 +88,102 @@ Http_Response :: struct {
     status_code: Http_Status_Code,
 }
 
-get_value :: proc(header_map: ^Http_Header_Map, name: []u8) -> (value: []u8, found: bool) {
-    entry := header_map.head
-    for entry != nil {
-        if memory_compare(entry.name, name) {
-            value = entry.value
-            found = true
+header_map_init :: proc(header_map: ^Http_Header_Map, arena: runtime.Allocator) {
+    using header_map
+    buckets = make([]Http_Header_Entry, BUCKET_COUNT, arena)
+    count = 0
+}
+
+header_map_reset :: proc(header_map: ^Http_Header_Map) {
+    using header_map
+    count = 0
+    for &bucket in buckets {
+        bucket.name = nil
+    }
+}
+
+header_map_insert_precomputed :: proc(header_map: ^Http_Header_Map, name: []u8, value: []u8, digest: u64) -> (err: bool) {
+    using header_map
+    for idx := 0; idx < len(buckets); idx += 1 {
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
+        field := &buckets[key_idx]
+
+        if field.name == nil {
+            field.name = name
+            field.value = value
+            count += 1
+            return
+        }
+        // TODO(louis): What about duplicates?
+    }
+
+    err = true
+    return
+}
+
+header_map_insert :: proc(header_map: ^Http_Header_Map, name: []u8, value: []u8) -> (err: bool) {
+    using header_map
+    digest := xxhash.XXH3_64_default(name)
+
+    for idx := 0; idx < len(buckets); idx += 1 {
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
+        field := &buckets[key_idx]
+
+        if field.name == nil {
+            field.name = name
+            field.value = value
+            count += 1
+            return
+        }
+        // TODO(louis): What about duplicates?
+    }
+
+    err = true
+    return
+}
+
+header_map_get_precomputed :: proc(header_map: ^Http_Header_Map, name: []u8, digest: u64) -> (result: []u8, err: bool) {
+    using header_map 
+
+    for idx := 0; idx < len(buckets); idx += 1 {
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
+        field := &buckets[key_idx]
+
+        if field.name == nil {
+            err = true
             return
         }
 
-        entry = entry.next
+        if memory_compare(field.name, name) {
+            result = field.value
+            return
+        }
     }
 
-    found = false
-    value = nil
+    err = true
+    return
+}
+
+
+header_map_get :: proc(header_map: ^Http_Header_Map, name: []u8) -> (result: []u8, err: bool) {
+    using header_map
+    digest := xxhash.XXH3_64_default(name)
+
+    for idx := 0; idx < len(buckets); idx += 1 {
+        key_idx := (digest + u64(idx)) & (BUCKET_COUNT - 1)
+        field := &buckets[key_idx]
+        if field.name == nil {
+            err = true
+            return
+        }
+
+        if memory_compare(field.name, name) {
+            result = field.value
+            return
+        }
+    }
+
+    err = true
     return
 }
 
@@ -175,13 +264,11 @@ parse_header :: proc(connection: ^Client_Connection) {
         value := message_header_buffer[name_end+1:value_end]
         message_header_buffer = message_header_buffer[value_end+u32(len(CRLF)):]
 
-        entry := new(Http_Header_Entry, connection.arena)
-        entry.name = name
-        entry.value = value
-
-        tmp := connection.request.header_map.head
-        connection.request.header_map.head = entry
-        entry.next = tmp
+        err := header_map_insert(&connection.request.header_map, name, value)
+        if err {
+            parser_state = .Error
+            return
+        }
     }
 
     parser_state = .CompleteHeader
@@ -198,44 +285,57 @@ handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store
     case .Post:
     case .Get:
         // TODO(louis): Verify that it is not possible to have a uri of length zero
-        content, asset_not_found := asset_store_get(asset_store, request.uri[1:])
-        if !asset_not_found {
+        content, asset_err := asset_store_get(asset_store, request.uri[1:])
+        if !asset_err {
             response.body = content
-            content_len_entry := new(Http_Header_Entry, arena)
-            content_len_entry.name = transmute([]u8)CONTENT_LENGTH_LITERAL
-            content_len_entry.value = u32_to_string(u32(len(content)), arena)
-            response.header_map.head = content_len_entry
+            content_length := u32_to_string(u32(len(content)), arena)
+            err := header_map_insert_precomputed(
+                &response.header_map, 
+                CONTENT_LENGTH_LITERAL, 
+                content_length, 
+                CONTENT_LENGTH_HASH
+            )
+            assert(!err)
             response.status_code = .OK
         } else {
-            response.status_code = .Not_Found
-            connection_entry := new(Http_Header_Entry, arena)
-            connection_entry.name = transmute([]u8)CONNECTION_LITERAL
-            connection_entry.value = transmute([]u8)CLOSE_LITERAL
-            content_len_entry := new(Http_Header_Entry, arena)
-            content_len_entry.name = transmute([]u8)CONTENT_LENGTH_LITERAL
-            content_len_entry.value = transmute([]u8)ZERO_LITERAL
-            content_len_entry.next = connection_entry
-            response.header_map.head = content_len_entry
             // TODO(louis): We should probably consider reporting back that we should close the connection
+            response.status_code = .Not_Found
+            err: bool
+            // TODO(louis): These should not happen
+            err = header_map_insert_precomputed(
+                &response.header_map, 
+                CONNECTION_LITERAL, 
+                CLOSE_LITERAL, 
+                CONNECTION_HASH
+            )
+            assert(!err)
+            err = header_map_insert_precomputed(
+                &response.header_map, 
+                CONTENT_LENGTH_LITERAL, 
+                ZERO_LITERAL, 
+                CONTENT_LENGTH_HASH 
+            )
+            assert(!err)
         }
     }
 
     return
 }
 
+// TODO(louis): Handle the errors, please
 write_response :: proc(connection: ^Client_Connection) {
     using connection
-    write(&writer, transmute([]u8)HTTP_VERSION_1_1_LITERAL)   
+    write(&writer, HTTP_VERSION_1_1_LITERAL)   
     write(&writer, u8(' '))   
     status_code := lookup_status_code(response.status_code)
     write(&writer, transmute([]u8)status_code)
-    header_entry := response.header_map.head
-    for header_entry != nil {
-        write(&writer, header_entry.name)
-        write(&writer, ": ")
-        write(&writer, header_entry.value)
-        write(&writer, CRLF)
-        header_entry = header_entry.next
+    for bucket in response.header_map.buckets {
+        if bucket.name != nil {
+            write(&writer, bucket.name)
+            write(&writer, ": ")
+            write(&writer, bucket.value)
+            write(&writer, CRLF)
+        }
     }
 
     write(&writer, CRLF)
@@ -247,6 +347,21 @@ write_response :: proc(connection: ^Client_Connection) {
 
 handle_connection :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store) -> (result: Connection_State) {
     using connection
+    if parser.offset == u32(len(parser.buffer) - 1) {
+        response.status_code = .Request_Entity_Too_Large
+        err := header_map_insert_precomputed(
+            &response.header_map, 
+            CONNECTION_LITERAL, 
+            CLOSE_LITERAL, 
+            CONNECTION_HASH
+        )
+        assert(!err)
+        write_response(connection)
+        net.close(client_socket)
+        result = .Closed
+        return
+    }
+
     bytes_read, err := net.recv_tcp(client_socket, parser.buffer[parser.offset:])
     if err != nil {
         net.close(client_socket)
@@ -263,23 +378,25 @@ handle_connection :: proc(connection: ^Client_Connection, asset_store: ^Asset_St
             handle_request(connection, asset_store)
             write_response(connection)
             // TODO(louis): Improve detection of complete messages
-            assert(parser.message_length <= parser.offset)
             if parser.message_length == parser.offset {
                 connection_reset(connection)
                 break loop
             }
 
-            // TODO(louis): Refactor this into a connection reset with offset
+            assert(parser.message_length > parser.offset)
             memory_copy(parser.buffer, parser.buffer[parser.message_length:parser.offset])
-            free_all(arena)
-            parser.offset = parser.offset - parser.message_length
-            request.header_map.head = nil
-            response.header_map.head = nil
-            parser.prev_offset = 0
-            parser.parser_state = .IncompleteHeader
-            writer.offset = 0
+            connection_reset_with_offset(connection, parser.offset - parser.message_length)
         case .Error:
-            net.close(client_socket)
+            connection.response.status_code = .Bad_Request
+            header_map_insert_precomputed(
+                &connection.response.header_map, 
+                CONNECTION_LITERAL, 
+                CLOSE_LITERAL, 
+                CONNECTION_HASH
+            )
+            write_response(connection)
+            // TODO(louis): Where should we close our connection?
+            net.close(connection.client_socket)
             result = .Closed
             break loop
         case .IncompleteHeader, .CompleteHeader:
@@ -304,9 +421,9 @@ http_parse :: proc(connection: ^Client_Connection) {
     }
 
     if parser_state == .CompleteHeader {
-        content_length_str, cl_found := get_value(&connection.request.header_map, transmute([]u8)CONTENT_LENGTH_LITERAL)
+        content_length_str, cl_err := header_map_get_precomputed(&connection.request.header_map, CONTENT_LENGTH_LITERAL, CONTENT_LENGTH_HASH)
         header_length := header_end + u32(len(CRLF))
-        if !cl_found {
+        if cl_err {
             message_length = header_length
             parser_state = .CompleteMessage
         } else {

@@ -244,7 +244,7 @@ init_messages :: proc(messages: []Http_Message) -> (result: u64) {
     return
 }
 
-main :: proc() {
+/* main :: proc() {
     messages := make([]Http_Message, MESSAGE_COUNT, context.temp_allocator)
     field_count := init_messages(messages)
     backing_buffer := make([]u8, 4 * runtime.Megabyte, context.temp_allocator)
@@ -261,7 +261,7 @@ main :: proc() {
                 ll_insert(&ll_map, field.key, field.value, arena_alloc)
             }
 
-            #reverse for field in msg.fields {
+            for field in msg.fields {
                 // TODO(louis): Maybe we have to do something with the value in order to 
                 // not get it optimized away
                 value, err := ll_get(&ll_map, field.key)
@@ -321,7 +321,7 @@ main :: proc() {
             for field in msg.fields {
                 // TODO(louis): Maybe we have to do something with the value in order to 
                 // not get it optimized away
-                value, err := hash_get_precomputed(&hash_map, field.key, field.precomputed_idx)
+                value, err := hash_get(&hash_map, field.key)
                 assert(!err)
             }
 
@@ -335,4 +335,4 @@ main :: proc() {
     free_all(arena_alloc)
     tester_count_units(&hash_tester, field_count)
     tester_print(&hash_tester)
-}
+} */
