@@ -8,7 +8,13 @@ import "base:runtime"
 import "core:hash/xxhash"
 
 // TODO(louis): Maybe implement this as a hashmap in the future 
-
+CONNS_PER_THREAD :: 128
+CONN_REQ_BUF_SIZE :: 2 * mem.Megabyte
+CONN_RES_BUF_SIZE :: 2 * mem.Megabyte
+CONN_SCRATCH_SIZE :: 4 * mem.Megabyte // This includes the header map as well as the output buffer for compressed content
+MEM_PER_CONN :: size_of(Client_Connection) + CONN_REQ_BUF_SIZE + CONN_RES_BUF_SIZE + CONN_SCRATCH_SIZE
+NTHREADS :: 6
+MEMORY : u64 : NTHREADS * CONNS_PER_THREAD * MEM_PER_CONN
 BUCKET_COUNT :: 128
 
 Http_Header_Entry :: struct {

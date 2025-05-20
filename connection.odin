@@ -5,14 +5,6 @@ import "core:net"
 import "core:mem"
 import "core:fmt"
 
-CONNS_PER_THREAD :: 128
-CONN_REQ_BUF_SIZE :: 2 * mem.Megabyte
-CONN_RES_BUF_SIZE :: 2 * mem.Megabyte
-CONN_SCRATCH_SIZE :: 4 * mem.Megabyte // This includes the header map as well as the output buffer for compressed content
-MEM_PER_CONN :: size_of(Client_Connection) + CONN_REQ_BUF_SIZE + CONN_RES_BUF_SIZE + CONN_SCRATCH_SIZE
-NTHREADS :: 6
-MEMORY : u64 : NTHREADS * CONNS_PER_THREAD * MEM_PER_CONN
-
 Client_Connection :: struct {
     client_socket: net.TCP_Socket,
     arena: runtime.Allocator,
@@ -30,13 +22,12 @@ Connection_Pool :: struct {
 }
 
 connection_reset_with_offset :: proc(conn: ^Client_Connection, offset: u32) {
-    using conn
     // NOTE(louis): This just sets the offset of the underlying arena to zero
     free_all(conn.arena) 
-    parser.offset = offset
-    parser.prev_offset = 0
-    parser.parser_state = .IncompleteHeader
-    writer.offset = 0
+    conn.parser.offset = offset
+    conn.parser.prev_offset = 0
+    conn.parser.parser_state = .IncompleteHeader
+    conn.writer.offset = 0
     header_map_reset(&conn.request.header_map)
     header_map_reset(&conn.response.header_map)
 }
@@ -83,16 +74,16 @@ pool_acquire :: proc(pool: ^Connection_Pool, client_socket: net.TCP_Socket) -> (
     pool.used[pool.used_len] = conn
     idx = pool.used_len
     pool.used_len += 1
-    when ODIN_DEBUG {
+    /* when ODIV_DEBUG {
         fmt.println("Acquiring ", idx)
-    }
+    } */
     return
 }
 
-pool_release :: proc(pool: ^Connection_Pool, idx: u32, loc := #caller_location) {
-    when ODIN_DEBUG {
+pool_release :: proc(pool: ^Connection_Pool, idx: u32/*,loc := #caller_location*/) {
+    /* when ODIN_DEBUG {
         fmt.printfln("Releasing connection %d from {:v}", idx, loc)
-    }
+    } */
     assert(pool.used_len > 0)
     conn := pool.used[idx]
     pool.free[pool.free_len] = conn

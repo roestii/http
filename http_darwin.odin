@@ -93,11 +93,6 @@ main :: proc() {
                     return
                 }
 
-                if err != nil {
-                    fmt.eprintln("Unable to accept on socket: ", err)
-                    return
-                }
-
                 // TODO(louis): Verify that this can never happen
                 assert(change_count < len(kq_change_list))
 
