@@ -16,6 +16,61 @@ IO_Uring_Cqe :: struct {
 	// __u64 big_cqe[],
 }
 
+IO_Uring_Op :: enum u8 {
+	NOP,
+	READV,
+	WRITEV,
+	FSYNC,
+	READ_FIXED,
+	WRITE_FIXED,
+	POLL_ADD,
+	POLL_REMOVE,
+	SYNC_FILE_RANGE,
+	SENDMSG,
+	RECVMSG,
+	TIMEOUT,
+	TIMEOUT_REMOVE,
+	ACCEPT,
+	ASYNC_CANCEL,
+	LINK_TIMEOUT,
+	CONNECT,
+	FALLOCATE,
+	OPENAT,
+	CLOSE,
+	FILES_UPDATE,
+	STATX,
+	READ,
+	WRITE,
+	FADVISE,
+	MADVISE,
+	SEND,
+	RECV,
+	OPENAT2,
+	EPOLL_CTL,
+	SPLICE,
+	PROVIDE_BUFFERS,
+	REMOVE_BUFFERS,
+	TEE,
+	SHUTDOWN,
+	RENAMEAT,
+	UNLINKAT,
+	MKDIRAT,
+	SYMLINKAT,
+	LINKAT,
+	MSG_RING,
+	FSETXATTR,
+	SETXATTR,
+	FGETXATTR,
+	GETXATTR,
+	SOCKET,
+	URING_CMD,
+	SEND_ZC,
+	SENDMSG_ZC,
+
+	/* this goes last, obviously */
+	LAST,
+};
+
 IORING_OFF_SQ_RING :: u64(0)
 IORING_OFF_CQ_RING :: u64(0x8000000)
 IORING_OFF_SQES :: u64(0x10000000)
@@ -23,13 +78,23 @@ IORING_OFF_PBUF_RING :: u64(0x80000000)
 IORING_OFF_PBUF_SHIFT :: 16
 IORING_OFF_MMAP_MASK :: u64(0xf8000000)
 
-IO_Ring_SQ_Bits :: enum {
+IO_Uring_Enter_Bits :: enum u32 {
+    GETEVENTS = 0,
+    SQ_WAKEUP =	1,
+    SQ_WAIT	= 2,
+    EXT_ARG	= 3,
+    REGISTERED_RING = 4
+}
+
+IO_Uring_Enter_Flags :: bit_set[IO_Uring_Enter_Bits; u32]
+
+IO_Uring_SQ_Bits :: enum {
     NEED_WAKEUP = 0, /* needs io_uring_enter wakeup */
     CQ_OVERFLOW = 1, /* CQ ring is overflown */
     TASKRUN = 2 /* task should enter the kernel */
 }
 
-IO_Ring_SQ_Flags :: bit_set[IO_Ring_SQ_Bits; u32]
+IO_Uring_SQ_Flags :: bit_set[IO_Uring_SQ_Bits; u32]
 
 IO_Uring_Feat_Bits :: enum u32 {
     SINGLE_MMAP = 0,
@@ -100,9 +165,36 @@ IO_Cqring_Offsets :: struct {
 	user_addr: u64
 }
 
+IOSQE_FIXED_FILE_BIT :: 0
+IOSQE_IO_DRAIN_BIT :: 1
+IOSQE_IO_LINK_BIT :: 2
+IOSQE_IO_HARDLINK_BIT :: 3
+IOSQE_ASYNC_BIT :: 4
+IOSQE_BUFFER_SELECT_BIT :: 5
+IOSQE_CQE_SKIP_SUCCESS_BIT :: 6
+
+IO_Sqe_Bits :: enum {
+    /* use fixed fileset */
+    FIXED_FILE = IOSQE_FIXED_FILE_BIT,
+    /* issue after inflight IO */
+    IO_DRAIN = IOSQE_IO_DRAIN_BIT,
+    /* links next sqe */
+    IO_LINK	= IOSQE_IO_LINK_BIT,
+    /* like LINK, but stronger */
+    IO_HARDLINK	= IOSQE_IO_HARDLINK_BIT,
+    /* always go async */
+    ASYNC = IOSQE_ASYNC_BIT,
+    /* select buffer from sqe->buf_group */
+    BUFFER_SELECT = IOSQE_BUFFER_SELECT_BIT,
+    /* don't post CQE if request succeeded */
+    CQE_SKIP_SUCCESS = IOSQE_CQE_SKIP_SUCCESS_BIT
+}
+
+IO_Sqe_Flags :: bit_set[IO_Sqe_Bits; u8]
+
 IO_Uring_Sqe :: struct {
-    opcode: u8,		/* type of operation for this sqe */
-	flags: u8,		/* IOSQE_ flags */
+    opcode: IO_Uring_Op,		/* type of operation for this sqe */
+	flags: IO_Sqe_Flags,		/* IOSQE_ flags */
 	ioprio: u16,		/* ioprio for the request */
 	fd: i32,		/* file descriptor to do IO on */
 	using _: struct #raw_union {
@@ -188,15 +280,14 @@ sys_io_uring_register :: proc "contextless" (fd: u32, op_code: u32, args: rawptr
 
 Sig_Set :: distinct u32
 
-sys_io_uring_enter :: proc "contextless" (fd: u32, to_submit: u32, min_complete: u32, flags: u32, sig: [^]Sig_Set, size: u32) -> (result: int) {
+sys_io_uring_enter :: proc "contextless" (fd: u32, to_submit: u32, min_complete: u32, flags: u32, sig: [^]Sig_Set) -> (result: int) {
     result = int(intrinsics.syscall(
         linux.SYS_io_uring_enter, 
         uintptr(fd), 
         uintptr(to_submit), 
         uintptr(min_complete), 
         uintptr(flags), 
-        uintptr(sig), 
-        uintptr(size)
+        uintptr(sig)
     ))
     return
 }

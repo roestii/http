@@ -27,6 +27,7 @@ server_loop_epoll :: proc(
         { .IN },
         { u32 = NEGATIVE_ONE_U32 }
     }
+
     errno = linux.epoll_ctl(efd, .ADD, linux.Fd(server_socket), &server_event)
     if errno != .NONE {
         fmt.eprintln("Cannot add server socket to epoll.")
@@ -135,9 +136,9 @@ server_loop_io_uring :: proc(
 }
 
 when IO_URING {
-    server_loop := server_loop_io_uring
+    server_loop :: server_loop_io_uring
 } else {
-    server_loop := server_loop_epoll
+    server_loop :: server_loop_epoll
 }
 
 main :: proc() {

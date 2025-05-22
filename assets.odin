@@ -21,20 +21,18 @@ Asset_Store :: struct {
 }
 
 asset_store_insert :: proc(asset_store: ^Asset_Store, name: []u8, content: []u8) -> (err: bool) {
-    using asset_store
-    if count == u32(len(assets)) {
+    if asset_store.count == u32(len(asset_store.assets)) {
         err = true 
         return
     }
 
-    assets[count] = { name, content }
-    count += 1
+    asset_store.assets[asset_store.count] = { name, content }
+    asset_store.count += 1
     return
 }
 
 asset_store_get :: proc(asset_store: ^Asset_Store, name: []u8) -> (result: []u8, err: bool) {
-    using asset_store
-    for asset in assets {
+    for asset in asset_store.assets {
         if asset.name != nil && memory_compare(asset.name, name) {
             result = asset.content
             return
