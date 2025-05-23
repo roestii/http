@@ -5,6 +5,7 @@ package io_uring
 import "core:sys/linux"
 import "core:fmt"
 import "base:intrinsics"
+import "../x86intrin"
 
 ENTRY_COUNT :: 64
 SQ_THREAD_IDLE :: 2000
@@ -87,10 +88,10 @@ setup :: proc() -> (result: IO_Ring, err: linux.Errno) {
     return
 }
 
-submit_to_sq :: proc(ring_fd: linux.Fd, sring: ^Submission_Ring, fd: linux.Fd, op: IO_Uring_Op, buffer: []u8, user_data: u64) -> (err: linux.Errno) {
-    tail := sring.tail^
-    mask := sring.mask^
-    sqe := &sring.entries[tail & mask]
+submit_to_sq :: proc(ioring: ^IO_Ring, fd: linux.Fd, op: IO_Uring_Op, buffer: []u8, user_data: u64) -> (err: linux.Errno) {
+    tail := ioring.sring.tail^
+    mask := ioring.sring.mask^
+    sqe := &ioring.sring.entries[tail & mask]
 
     sqe.fd = i32(fd)
     sqe.addr = u64(uintptr(raw_data(buffer)))
@@ -98,11 +99,14 @@ submit_to_sq :: proc(ring_fd: linux.Fd, sring: ^Submission_Ring, fd: linux.Fd, o
     sqe.user_data = user_data
     sqe.opcode = op
     // The previous stores to the sqe cannot be reordered past the store to the tail
-    intrinsics.atomic_store(sring.tail, tail + 1)
-    if .NEED_WAKEUP in sring.flags {
+    // TODO(louis): Look at the codegen for the atomic store, in reality we probably just need 
+    // a fence here
+    x86intrin.mfence()
+    ioring.sring.tail^ = tail + 1
+    if .NEED_WAKEUP in ioring.sring.flags {
         enter_flags: IO_Uring_Enter_Flags = {.SQ_WAKEUP}
         err = linux.Errno(sys_io_uring_enter(
-            u32(ring_fd), 
+            u32(ioring.ring_fd), 
             1, 
             1, 
             transmute(u32)enter_flags, 
@@ -114,5 +118,23 @@ submit_to_sq :: proc(ring_fd: linux.Fd, sring: ^Submission_Ring, fd: linux.Fd, o
     return
 }
 
-read_from_cq :: proc(ioring: ^IO_Ring) {
+read_from_cq :: proc(ioring: ^IO_Ring) -> (result: IO_Uring_Cqe) {
+    mask := ioring.cring.mask^
+    // TODO(louis): Look at the codegen for the atomic load, in reality we probably just need 
+    // a fence here
+    // All previous stores should be visible here
+    x86intrin.mfence()
+    head := ioring.cring.head^
+    tail := ioring.cring.tail^
+    for head == tail { 
+        x86intrin.pause() 
+        x86intrin.mfence()
+        tail := ioring.cring.tail^
+    }
+
+    result = ioring.cring.entries[head & mask]
+    // Make the store visible to the kernel thread
+    ioring.cring.head^ = head + 1
+    x86intrin.mfence()
+    return
 }

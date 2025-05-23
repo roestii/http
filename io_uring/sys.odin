@@ -7,6 +7,7 @@ import "core:sys/linux"
 IO_Uring_Cqe :: struct {
     user_data: u64,	/* sqe->data submission passed back */
 	res: i32,		/* result code for this event */
+    // TODO(louis): Migrate this flags field to an odin bit_set
 	flags: u32,
 
 	/*
