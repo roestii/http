@@ -1,4 +1,5 @@
 bits 64
+
 section .text
 global _pause 
 global _mfence

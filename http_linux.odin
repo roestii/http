@@ -6,12 +6,22 @@ import "core:mem"
 import "core:net"
 import "io_uring"
 
-NEGATIVE_ONE_U32 :: transmute(u32)i32(-1)
+SERVER_SOCKET_USER_DATA :: transmute(u64)i64(-1)
 
 IO_URING :: #config(IO_URING, true)
+Fd_Type :: linux.Fd
+Errno :: linux.Errno
+
+// TODO(louis): Should we consider moving the write of the response to the ring as well?
+// If we do so, we have to check in our server main loop that the completion queue entry comes from 
+// the write. Or maybe there is a way to not have a cqe for the write sqe
+send_tcp :: proc(fd: linux.Fd, buffer: []u8) -> (bytes_written: int, errno: linux.Errno){
+    bytes_written, errno = linux.send(fd, buffer, {.NOSIGNAL})
+    return
+}
 
 server_loop_epoll :: proc(
-    server_socket: net.TCP_Socket, 
+    server_socket: linux.Fd, 
     conn_pool: ^Connection_Pool, 
     asset_store: ^Asset_Store
 ) {
@@ -25,7 +35,7 @@ server_loop_epoll :: proc(
 
     server_event := linux.EPoll_Event {
         { .IN },
-        { u32 = NEGATIVE_ONE_U32 }
+        { u64 = SERVER_SOCKET_USER_DATA }
     }
 
     errno = linux.epoll_ctl(efd, .ADD, linux.Fd(server_socket), &server_event)
@@ -45,8 +55,9 @@ server_loop_epoll :: proc(
 
         for event_idx in 0..<event_count {
             event := events[event_idx]
-            if event.data.u32 == NEGATIVE_ONE_U32 {
-                client, source, accept_err := net.accept_tcp(server_socket)
+            if event.data.u64 == SERVER_SOCKET_USER_DATA {
+                client_addr: linux.Sock_Addr_In
+                client, accept_err := linux.accept(server_socket, &client_addr, {})
                 if accept_err != nil {
                     fmt.eprintln("Error while accepting")
                     return
@@ -78,22 +89,22 @@ server_loop_epoll :: proc(
                 conn_idx := event.data.u32
                 client_conn: ^Client_Connection = &conn_pool.used[conn_idx]
                 if .HUP in event.events || .ERR in event.events {
-                    net.close(net.TCP_Socket(client_conn.client_socket))
+                    linux.close(client_conn.client_socket)
                     connection_reset(client_conn)
                     pool_release(conn_pool, conn_idx)
                 } else {
                     // TODO(louis): Verify that reading into a buffer with size zero returns no error,
                     // because we rely on that fact to handle the corresponding response in the 
                     // platform-agnostic code, i.e. http.odin
-                    bytes_read, err := net.recv_tcp(client_conn.client_socket, client_conn.parser.buffer[client_conn.parser.offset:])
-                    if err != nil {
+                    bytes_read, err := linux.read(client_conn.client_socket, client_conn.parser.buffer[client_conn.parser.offset:])
+                    if err != .NONE {
                         epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(client_conn.client_socket), nil)
                         if epoll_err != .NONE {
                             fmt.eprintln("Cannot remove client socket from epoll.")
                             // TODO(louis): We should not return here, probably
                             return
                         }
-                        net.close(client_conn.client_socket)
+                        linux.close(client_conn.client_socket)
                         connection_reset(client_conn)
                         pool_release(conn_pool, conn_idx)
                     } else {
@@ -108,7 +119,7 @@ server_loop_epoll :: proc(
                                 return
                             }
 
-                            net.close(client_conn.client_socket)
+                            linux.close(client_conn.client_socket)
                             connection_reset(client_conn)
                             pool_release(conn_pool, conn_idx)
                         }
@@ -120,7 +131,7 @@ server_loop_epoll :: proc(
 }
 
 server_loop_io_uring :: proc(
-    server_socket: net.TCP_Socket, 
+    server_socket: linux.Fd, 
     conn_pool: ^Connection_Pool, 
     asset_store: ^Asset_Store
 ) {
@@ -132,7 +143,62 @@ server_loop_io_uring :: proc(
 
 
     // TODO(louis): Implement adding to the submission queue and reading from the 
-    // completion queue (keep in mind to check the sq_ring flags 
+    // completion queue (keep in mind to check the sq_ring flags)
+    errno = io_uring.submit_to_sq(
+        &ring, 
+        linux.Fd(server_socket), 
+        .ACCEPT, 
+        nil, 
+        SERVER_SOCKET_USER_DATA
+    )
+    if errno != .NONE {
+        fmt.eprintln("Unable to submit accept call to submission queue.")
+        return
+    }
+
+    for {
+        cqe := io_uring.read_from_cq(&ring)
+        if cqe.user_data == SERVER_SOCKET_USER_DATA {
+            if cqe.res >= 0 {
+                client_fd := linux.Fd(cqe.res)
+                conn_idx, pool_err := pool_acquire(conn_pool, client_fd)
+                if !pool_err {
+                    conn := &conn_pool.used[conn_idx]
+                    errno = io_uring.submit_to_sq(
+                        &ring, 
+                        linux.Fd(client_fd), 
+                        .READ, 
+                        conn.parser.buffer,
+                        u64(conn_idx)
+                    )
+
+                    // TODO(louis): Should we close the connection when our cq overflows?
+                    if errno != .NONE {
+                        linux.close(client_fd)
+                    }
+                } else {
+                    linux.close(client_fd)
+                }
+            }
+        } else {
+            conn_idx := u32(cqe.user_data)
+            conn := &conn_pool.used[conn_idx]
+            if cqe.res >= 0 {
+                conn.parser.prev_offset = conn.parser.offset
+                conn.parser.offset += u32(cqe.res)
+                #partial switch handle_connection(conn, asset_store) {
+                case .Close:
+                    linux.close(conn.client_socket)
+                    connection_reset(conn)
+                    pool_release(conn_pool, conn_idx)
+                }
+            } else {
+                linux.close(conn.client_socket)
+                connection_reset(conn)
+                pool_release(conn_pool, conn_idx)
+            }
+        }
+    }
 }
 
 when IO_URING {
@@ -182,7 +248,7 @@ main :: proc() {
     server_loop(socket, &conn_pools[0], &asset_store)
 }
 
-init_socket :: proc() -> (socket: net.TCP_Socket, err: net.Network_Error) {
+init_socket :: proc() -> (socket: linux.Fd, err: net.Network_Error) {
     // socket := net.create_socket(.IP4, .TCP) or_return // this is theoretically platform-agnostic but whatever
     // socket = socket.(net.TCP_Socket)
     endpoint := net.Endpoint{ 
@@ -190,7 +256,9 @@ init_socket :: proc() -> (socket: net.TCP_Socket, err: net.Network_Error) {
         8080
     }
 
-    socket = net.listen_tcp(endpoint) or_return
+    socket_net := net.listen_tcp(endpoint) or_return
+    socket = linux.Fd(socket_net)
+    // TODO(louis): Use the posix api to setup the socket
     return
 }
 

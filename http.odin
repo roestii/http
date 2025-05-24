@@ -329,26 +329,31 @@ handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store
 }
 
 // TODO(louis): Handle the errors, please
-write_response :: proc(connection: ^Client_Connection) {
-    using connection
-    write(&writer, HTTP_VERSION_1_1_LITERAL)   
-    write(&writer, u8(' '))   
-    status_code := lookup_status_code(response.status_code)
-    write(&writer, transmute([]u8)status_code)
-    for bucket in response.header_map.buckets {
+write_response :: proc(conn: ^Client_Connection) -> (errno: Errno) {
+    write(&conn.writer, HTTP_VERSION_1_1_LITERAL)   
+    write(&conn.writer, u8(' '))   
+    status_code := lookup_status_code(conn.response.status_code)
+    write(&conn.writer, transmute([]u8)status_code)
+    for bucket in conn.response.header_map.buckets {
         if bucket.name != nil {
-            write(&writer, bucket.name)
-            write(&writer, ": ")
-            write(&writer, bucket.value)
-            write(&writer, CRLF)
+            write(&conn.writer, bucket.name)
+            write(&conn.writer, ": ")
+            write(&conn.writer, bucket.value)
+            write(&conn.writer, CRLF)
         }
     }
 
-    write(&writer, CRLF)
-    net.send_tcp(client_socket, writer.buffer[:writer.offset])
-    if response.body != nil {
-        net.send_tcp(client_socket, response.body)
+    write(&conn.writer, CRLF)
+    bytes_written: int
+    bytes_written, errno = send_tcp(conn.client_socket, conn.writer.buffer[:conn.writer.offset])
+    if errno != .NONE {
+        return
     }
+    if conn.response.body != nil {
+        bytes_written, errno = send_tcp(conn.client_socket, conn.response.body)
+    }
+
+    return
 }
 
 handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -> (result: Connection_State) {
@@ -362,7 +367,7 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -
             CONNECTION_HASH 
         )
         assert(!err)
-        write_response(conn)
+        errno := write_response(conn)
         result = .Close
         return
     }

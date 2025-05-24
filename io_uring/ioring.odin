@@ -20,6 +20,7 @@ Completion_Ring :: struct {
 
 Submission_Ring :: struct {
     tail: ^u32,
+    head: ^u32,
     mask: ^u32,
     // These flags have to be checked for NEED_WAKEUP
     flags: ^IO_Uring_SQ_Flags,
@@ -82,6 +83,7 @@ setup :: proc() -> (result: IO_Ring, err: linux.Errno) {
     result.sring.entries = (transmute([^]IO_Uring_Sqe)sq_entries_raw)[:params.sq_entries]
 
     result.cring.tail = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.tail))
+    result.cring.head = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.head))
     result.cring.mask = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.ring_mask))
     // result.cring_flags = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.flags))
     result.cring.entries = (transmute([^]IO_Uring_Cqe)(uintptr(cq_ptr) + uintptr(params.cq_off.cqes)))[:params.cq_entries]
@@ -89,7 +91,17 @@ setup :: proc() -> (result: IO_Ring, err: linux.Errno) {
 }
 
 submit_to_sq :: proc(ioring: ^IO_Ring, fd: linux.Fd, op: IO_Uring_Op, buffer: []u8, user_data: u64) -> (err: linux.Errno) {
-    tail := ioring.sring.tail^
+    // TODO(louis): Check whether the submission queue is full
+
+
+    // TODO(louis): Does this have to be atomic?
+    sring_flags := intrinsics.atomic_load(ioring.sring.flags)
+    if .CQ_OVERFLOW in sring_flags {
+        err = .EBUSY 
+        return
+    }
+
+    tail := intrinsics.atomic_load(ioring.sring.tail)
     mask := ioring.sring.mask^
     sqe := &ioring.sring.entries[tail & mask]
 
@@ -101,9 +113,8 @@ submit_to_sq :: proc(ioring: ^IO_Ring, fd: linux.Fd, op: IO_Uring_Op, buffer: []
     // The previous stores to the sqe cannot be reordered past the store to the tail
     // TODO(louis): Look at the codegen for the atomic store, in reality we probably just need 
     // a fence here
-    x86intrin.mfence()
-    ioring.sring.tail^ = tail + 1
-    if .NEED_WAKEUP in ioring.sring.flags {
+    intrinsics.atomic_store(ioring.sring.tail, tail + 1)
+    if .NEED_WAKEUP in sring_flags {
         enter_flags: IO_Uring_Enter_Flags = {.SQ_WAKEUP}
         err = linux.Errno(sys_io_uring_enter(
             u32(ioring.ring_fd), 
@@ -123,18 +134,15 @@ read_from_cq :: proc(ioring: ^IO_Ring) -> (result: IO_Uring_Cqe) {
     // TODO(louis): Look at the codegen for the atomic load, in reality we probably just need 
     // a fence here
     // All previous stores should be visible here
-    x86intrin.mfence()
-    head := ioring.cring.head^
+    head := intrinsics.atomic_load(ioring.cring.head)
     tail := ioring.cring.tail^
     for head == tail { 
         x86intrin.pause() 
-        x86intrin.mfence()
-        tail := ioring.cring.tail^
+        tail = intrinsics.atomic_load(ioring.cring.tail)
     }
 
     result = ioring.cring.entries[head & mask]
     // Make the store visible to the kernel thread
-    ioring.cring.head^ = head + 1
-    x86intrin.mfence()
+    intrinsics.atomic_store(ioring.cring.head, head + 1)
     return
 }
