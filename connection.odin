@@ -5,26 +5,58 @@ import "core:net"
 import "core:mem"
 import "core:fmt"
 
+Connection_Bits :: enum u8 {
+    READ = 1, // This tells the main loop that we want to read again from the connection
+    WRITE = 2, // This tells the main loop that we issued a response send call to the client
+    CLOSE = 3 // This tells the main loop that it should close the connection after it consumed the response write (this cannot be used in combination with READ)
+}
+
+Connection_Flags :: bit_set[Connection_Bits; u32]
+
 Client_Connection :: struct {
     client_socket: Fd_Type,
     arena: runtime.Allocator,
     parser: Http_Parser,
     request: Http_Request,
     writer: Writer,
-    response: Http_Response
+    response: Http_Response,
+    flags: Connection_Flags
 }
 
 Connection_Pool :: struct {
+    free: []Client_Connection,
+    used: []Client_Connection,
     free_len: u32,
     used_len: u32,
-    free: []Client_Connection,
-    used: []Client_Connection
+}
+
+connection_reset_with_offset_noflags :: proc(conn: ^Client_Connection, offset: u32) {
+    // NOTE(louis): This just sets the offset of the underlying arena to zero
+    free_all(conn.arena) 
+    conn.parser.offset = offset
+    conn.parser.prev_offset = 0
+    conn.parser.parser_state = .IncompleteHeader
+    conn.writer.offset = 0
+    conn.flags = {}
+    header_map_reset(&conn.request.header_map)
+    header_map_reset(&conn.response.header_map)
 }
 
 connection_reset_with_offset :: proc(conn: ^Client_Connection, offset: u32) {
     // NOTE(louis): This just sets the offset of the underlying arena to zero
     free_all(conn.arena) 
     conn.parser.offset = offset
+    conn.parser.prev_offset = 0
+    conn.parser.parser_state = .IncompleteHeader
+    conn.writer.offset = 0
+    header_map_reset(&conn.request.header_map)
+    header_map_reset(&conn.response.header_map)
+}
+
+connection_reset_noflags :: proc(conn: ^Client_Connection) {
+    // NOTE(louis): This just sets the offset of the underlying arena to zero
+    free_all(conn.arena) 
+    conn.parser.offset = 0
     conn.parser.prev_offset = 0
     conn.parser.parser_state = .IncompleteHeader
     conn.writer.offset = 0
@@ -39,6 +71,7 @@ connection_reset :: proc(conn: ^Client_Connection) {
     conn.parser.prev_offset = 0
     conn.parser.parser_state = .IncompleteHeader
     conn.writer.offset = 0
+    conn.flags = {}
     header_map_reset(&conn.request.header_map)
     header_map_reset(&conn.response.header_map)
 }

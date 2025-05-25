@@ -11,13 +11,17 @@ SERVER_SOCKET_USER_DATA :: transmute(u64)i64(-1)
 IO_URING :: #config(IO_URING, true)
 Fd_Type :: linux.Fd
 Errno :: linux.Errno
-
 // TODO(louis): Should we consider moving the write of the response to the ring as well?
 // If we do so, we have to check in our server main loop that the completion queue entry comes from 
 // the write. Or maybe there is a way to not have a cqe for the write sqe
 send_tcp :: proc(fd: linux.Fd, buffer: []u8) -> (bytes_written: int, errno: linux.Errno){
     bytes_written, errno = linux.send(fd, buffer, {.NOSIGNAL})
     return
+}
+
+IO_Uring_Command :: bit_field u64 {
+    conn_idx: u32 | 32,
+    command: Connection_Bits | 8
 }
 
 server_loop_epoll :: proc(
@@ -53,7 +57,7 @@ server_loop_epoll :: proc(
             return
         }
 
-        for event_idx in 0..<event_count {
+        event_loop: for event_idx in 0..<event_count {
             event := events[event_idx]
             if event.data.u64 == SERVER_SOCKET_USER_DATA {
                 client_addr: linux.Sock_Addr_In
@@ -87,41 +91,58 @@ server_loop_epoll :: proc(
                 // TODO(louis): Somehow we free the connection multiple times, that should not happen...
                 // Something is really broken, test this further...
                 conn_idx := event.data.u32
-                client_conn: ^Client_Connection = &conn_pool.used[conn_idx]
+                conn: ^Client_Connection = &conn_pool.used[conn_idx]
                 if .HUP in event.events || .ERR in event.events {
-                    linux.close(client_conn.client_socket)
-                    connection_reset(client_conn)
+                    linux.close(conn.client_socket)
+                    connection_reset(conn)
                     pool_release(conn_pool, conn_idx)
                 } else {
                     // TODO(louis): Verify that reading into a buffer with size zero returns no error,
                     // because we rely on that fact to handle the corresponding response in the 
                     // platform-agnostic code, i.e. http.odin
-                    bytes_read, err := linux.read(client_conn.client_socket, client_conn.parser.buffer[client_conn.parser.offset:])
+                    bytes_read, err := linux.read(conn.client_socket, conn.parser.buffer[conn.parser.offset:])
                     if err != .NONE {
-                        epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(client_conn.client_socket), nil)
+                        epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(conn.client_socket), nil)
                         if epoll_err != .NONE {
                             fmt.eprintln("Cannot remove client socket from epoll.")
                             // TODO(louis): We should not return here, probably
                             return
                         }
-                        linux.close(client_conn.client_socket)
-                        connection_reset(client_conn)
+
+                        linux.close(conn.client_socket)
+                        connection_reset(conn)
                         pool_release(conn_pool, conn_idx)
                     } else {
-                        client_conn.parser.prev_offset = client_conn.parser.offset
-                        client_conn.parser.offset += u32(bytes_read)
-                        #partial switch handle_connection(client_conn, asset_store) {
-                        case .Close:
-                            epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(client_conn.client_socket), nil)
+                        conn.parser.prev_offset = conn.parser.offset
+                        conn.parser.offset += u32(bytes_read)
+                        handle_connection(conn, asset_store)
+                        if .WRITE in conn.flags {
+                            bytes_written, send_err := send_tcp(conn.client_socket, conn.writer.buffer[:conn.writer.offset])
+                            if send_err != .NONE {
+                                epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(conn.client_socket), nil)
+                                if epoll_err != .NONE {
+                                    fmt.eprintln("Cannot remove client socket from epoll.")
+                                    // TODO(louis): We should not return here, probably
+                                    return
+                                }
+                                linux.close(conn.client_socket)
+                                connection_reset(conn)
+                                pool_release(conn_pool, conn_idx)
+                                continue event_loop
+                            }
+                        }
+
+                        if .CLOSE in conn.flags {
+                            epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(conn.client_socket), nil)
                             if epoll_err != .NONE {
                                 fmt.eprintln("Cannot remove client socket from epoll.")
                                 // TODO(louis): We should not return here, probably
                                 return
                             }
-
-                            linux.close(client_conn.client_socket)
-                            connection_reset(client_conn)
+                            linux.close(conn.client_socket)
+                            connection_reset(conn)
                             pool_release(conn_pool, conn_idx)
+                            continue event_loop
                         }
                     }
                 }
@@ -151,6 +172,7 @@ server_loop_io_uring :: proc(
         nil, 
         SERVER_SOCKET_USER_DATA
     )
+
     if errno != .NONE {
         fmt.eprintln("Unable to submit accept call to submission queue.")
         return
@@ -174,23 +196,81 @@ server_loop_io_uring :: proc(
 
                     // TODO(louis): Should we close the connection when our cq overflows?
                     if errno != .NONE {
-                        linux.close(client_fd)
+                        linux.close(conn.client_socket)
+                        connection_reset(conn)
+                        pool_release(conn_pool, conn_idx)
                     }
                 } else {
                     linux.close(client_fd)
                 }
             }
         } else {
-            conn_idx := u32(cqe.user_data)
+            // TODO(louis): Verify that the user data cannot collide
+            ioring_cmd := IO_Uring_Command(cqe.user_data)
+            conn_idx := ioring_cmd.conn_idx
+            cmd := ioring_cmd.command
             conn := &conn_pool.used[conn_idx]
             if cqe.res >= 0 {
-                conn.parser.prev_offset = conn.parser.offset
-                conn.parser.offset += u32(cqe.res)
-                #partial switch handle_connection(conn, asset_store) {
-                case .Close:
-                    linux.close(conn.client_socket)
-                    connection_reset(conn)
-                    pool_release(conn_pool, conn_idx)
+                #partial switch cmd {
+                case .READ:
+                    conn.parser.prev_offset = conn.parser.offset
+                    conn.parser.offset += u32(cqe.res)
+                    // TODO(louis): We don't read again if the connection should be kept alive. That is a bug
+                    handle_connection(conn, asset_store)
+                    if .READ in conn.flags {
+                        cmd := IO_Uring_Command {
+                            conn_idx = conn_idx,
+                            command = .READ
+                        }
+                        errno = io_uring.submit_to_sq(
+                            &ring, 
+                            linux.Fd(conn.client_socket), 
+                            .READ, 
+                            conn.parser.buffer,
+                            u64(cmd)
+                        )
+
+                        // TODO(louis): Should we close the connection when our cq overflows?
+                        if errno != .NONE {
+                            linux.close(conn.client_socket)
+                            connection_reset(conn)
+                            pool_release(conn_pool, conn_idx)
+                        }
+                    }
+
+                    if .WRITE in conn.flags {
+                        cmd := IO_Uring_Command {
+                            conn_idx = conn_idx,
+                            command = .WRITE
+                        }
+                        errno = io_uring.submit_to_sq(
+                            &ring, 
+                            linux.Fd(conn.client_socket), 
+                            .WRITE, 
+                            conn.parser.buffer,
+                            u64(cmd)
+                        )
+
+                        // TODO(louis): Should we close the connection when our cq overflows?
+                        if errno != .NONE {
+                            linux.close(conn.client_socket)
+                            connection_reset(conn)
+                            pool_release(conn_pool, conn_idx)
+                        }
+                    } else if .CLOSE in conn.flags {
+                        assert(.WRITE not_in conn.flags)
+                        linux.close(conn.client_socket)
+                        connection_reset(conn)
+                        pool_release(conn_pool, conn_idx)
+                    }
+                case .WRITE:
+                    if .CLOSE in conn.flags {
+                        linux.close(conn.client_socket)
+                        connection_reset(conn)
+                        pool_release(conn_pool, conn_idx)
+                    }
+                case:
+                    assert(false)
                 }
             } else {
                 linux.close(conn.client_socket)

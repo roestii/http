@@ -329,7 +329,8 @@ handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store
 }
 
 // TODO(louis): Handle the errors, please
-write_response :: proc(conn: ^Client_Connection) -> (errno: Errno) {
+write_response :: proc(conn: ^Client_Connection) {
+    conn.flags |= {.WRITE}
     write(&conn.writer, HTTP_VERSION_1_1_LITERAL)   
     write(&conn.writer, u8(' '))   
     status_code := lookup_status_code(conn.response.status_code)
@@ -344,19 +345,9 @@ write_response :: proc(conn: ^Client_Connection) -> (errno: Errno) {
     }
 
     write(&conn.writer, CRLF)
-    bytes_written: int
-    bytes_written, errno = send_tcp(conn.client_socket, conn.writer.buffer[:conn.writer.offset])
-    if errno != .NONE {
-        return
-    }
-    if conn.response.body != nil {
-        bytes_written, errno = send_tcp(conn.client_socket, conn.response.body)
-    }
-
-    return
 }
 
-handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -> (result: Connection_State) {
+handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) {
     if conn.parser.prev_offset == conn.parser.offset {
         // NOTE(louis): This means nothing was read into the buffer indicating that it is full
         conn.response.status_code = .Request_Entity_Too_Large
@@ -367,8 +358,8 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -
             CONNECTION_HASH 
         )
         assert(!err)
-        errno := write_response(conn)
-        result = .Close
+        write_response(conn)
+        conn.flags = {.WRITE, .CLOSE}
         return
     }
 
@@ -380,13 +371,13 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -
             write_response(conn)
             // TODO(louis): Improve detection of complete messages
             if conn.parser.message_length == conn.parser.offset {
-                connection_reset(conn)
+                connection_reset_noflags(conn)
                 break loop
             }
 
             assert(conn.parser.message_length > conn.parser.offset)
             memory_copy(conn.parser.buffer, conn.parser.buffer[conn.parser.message_length:conn.parser.offset])
-            connection_reset_with_offset(conn, conn.parser.offset - conn.parser.message_length)
+            connection_reset_with_offset_noflags(conn, conn.parser.offset - conn.parser.message_length)
         case .Error:
             conn.response.status_code = .Bad_Request
             header_map_insert_precomputed(
@@ -397,14 +388,16 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) -
             )
             write_response(conn)
             // TODO(louis): Where should we close our conn?
-            result = .Close
+            conn.flags |= {.CLOSE}
             break loop
         case .IncompleteHeader, .CompleteHeader:
-            result = .KeepAlive
+            conn.flags |= {.READ}
             break loop
         }
     }
 
+    // TODO(louis): Is this really true
+    assert(!(.CLOSE in conn.flags && .READ in conn.flags))
     return
 }
 

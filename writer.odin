@@ -2,7 +2,7 @@ package http
 
 Writer :: struct {
     buffer: []u8,
-    offset: u32
+    offset: u32,
 }
 
 write_string :: proc(writer: ^Writer, str: string) -> (err: bool) {
