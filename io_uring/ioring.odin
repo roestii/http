@@ -5,7 +5,7 @@ package io_uring
 import "core:sys/linux"
 import "core:fmt"
 import "base:intrinsics"
-import "../x86intrin"
+//import "../x86intrin"
 
 ENTRY_COUNT :: 64
 SQ_THREAD_IDLE :: 2000
@@ -64,14 +64,14 @@ setup :: proc() -> (result: IO_Ring, err: linux.Errno) {
     }
 
     cq_ptr := sq_ptr
-    sq_entries_raw, sqe_mmap_errno := (linux.mmap(
+    sq_entries_raw, sqe_mmap_errno := linux.mmap(
         0,
         uint(params.sq_entries * size_of(IO_Uring_Sqe)),
         {.READ, .WRITE},
         {.SHARED, .POPULATE},
         result.ring_fd,
         i64(IORING_OFF_SQES)
-    ))
+    )
     if sqe_mmap_errno != .NONE {
         err = sqe_mmap_errno
         return
@@ -137,7 +137,7 @@ read_from_cq :: proc(ioring: ^IO_Ring) -> (result: IO_Uring_Cqe) {
     head := intrinsics.atomic_load(ioring.cring.head)
     tail := ioring.cring.tail^
     for head == tail { 
-        x86intrin.pause() 
+        //x86intrin.pause() 
         tail = intrinsics.atomic_load(ioring.cring.tail)
     }
 

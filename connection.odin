@@ -30,39 +30,39 @@ Connection_Pool :: struct {
     used_len: u32,
 }
 
-connection_reset_with_offset_noflags :: proc(conn: ^Client_Connection, offset: u32) {
-    // NOTE(louis): This just sets the offset of the underlying arena to zero
-    free_all(conn.arena) 
-    conn.parser.offset = offset
-    conn.parser.prev_offset = 0
-    conn.parser.parser_state = .IncompleteHeader
-    conn.writer.offset = 0
-    conn.flags = {}
-    header_map_reset(&conn.request.header_map)
-    header_map_reset(&conn.response.header_map)
-}
-
-connection_reset_with_offset :: proc(conn: ^Client_Connection, offset: u32) {
-    // NOTE(louis): This just sets the offset of the underlying arena to zero
-    free_all(conn.arena) 
-    conn.parser.offset = offset
-    conn.parser.prev_offset = 0
-    conn.parser.parser_state = .IncompleteHeader
-    conn.writer.offset = 0
-    header_map_reset(&conn.request.header_map)
-    header_map_reset(&conn.response.header_map)
-}
-
-connection_reset_noflags :: proc(conn: ^Client_Connection) {
-    // NOTE(louis): This just sets the offset of the underlying arena to zero
-    free_all(conn.arena) 
-    conn.parser.offset = 0
-    conn.parser.prev_offset = 0
-    conn.parser.parser_state = .IncompleteHeader
-    conn.writer.offset = 0
-    header_map_reset(&conn.request.header_map)
-    header_map_reset(&conn.response.header_map)
-}
+// connection_reset_with_offset_noflags :: proc(conn: ^Client_Connection, offset: u32) {
+//     // NOTE(louis): This just sets the offset of the underlying arena to zero
+//     free_all(conn.arena) 
+//     conn.parser.offset = offset
+//     conn.parser.prev_offset = 0
+//     conn.parser.parser_state = .IncompleteHeader
+//     conn.writer.offset = 0
+//     conn.flags = {}
+//     header_map_reset(&conn.request.header_map)
+//     header_map_reset(&conn.response.header_map)
+// }
+// 
+// connection_reset_with_offset :: proc(conn: ^Client_Connection, offset: u32) {
+//     // NOTE(louis): This just sets the offset of the underlying arena to zero
+//     free_all(conn.arena) 
+//     conn.parser.offset = offset
+//     conn.parser.prev_offset = 0
+//     conn.parser.parser_state = .IncompleteHeader
+//     conn.writer.offset = 0
+//     header_map_reset(&conn.request.header_map)
+//     header_map_reset(&conn.response.header_map)
+// }
+// 
+// connection_reset_noflags :: proc(conn: ^Client_Connection) {
+//     // NOTE(louis): This just sets the offset of the underlying arena to zero
+//     free_all(conn.arena) 
+//     conn.parser.offset = 0
+//     conn.parser.prev_offset = 0
+//     conn.parser.parser_state = .IncompleteHeader
+//     conn.writer.offset = 0
+//     header_map_reset(&conn.request.header_map)
+//     header_map_reset(&conn.response.header_map)
+// }
 
 connection_reset :: proc(conn: ^Client_Connection) {
     // NOTE(louis): This just sets the offset of the underlying arena to zero
@@ -71,6 +71,8 @@ connection_reset :: proc(conn: ^Client_Connection) {
     conn.parser.prev_offset = 0
     conn.parser.parser_state = .IncompleteHeader
     conn.writer.offset = 0
+    conn.response.body = nil
+    conn.request.body = nil
     conn.flags = {}
     header_map_reset(&conn.request.header_map)
     header_map_reset(&conn.response.header_map)

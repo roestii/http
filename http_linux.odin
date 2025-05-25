@@ -162,7 +162,6 @@ server_loop_io_uring :: proc(
         return
     }
 
-
     // TODO(louis): Implement adding to the submission queue and reading from the 
     // completion queue (keep in mind to check the sq_ring flags)
     errno = io_uring.submit_to_sq(
@@ -231,6 +230,7 @@ server_loop_io_uring :: proc(
                         )
 
                         // TODO(louis): Should we close the connection when our cq overflows?
+                        // There may be another write in flight, should we close this then?
                         if errno != .NONE {
                             linux.close(conn.client_socket)
                             connection_reset(conn)
@@ -247,7 +247,7 @@ server_loop_io_uring :: proc(
                             &ring, 
                             linux.Fd(conn.client_socket), 
                             .WRITE, 
-                            conn.parser.buffer,
+                            conn.writer.buffer[:conn.writer.offset],
                             u64(cmd)
                         )
 
@@ -294,7 +294,6 @@ main :: proc() {
         return
     } 
 
-
     base_memory: mem.Arena
     mem.arena_init(&base_memory, make([]u8, MEMORY, context.temp_allocator))
     defer free_all()
@@ -313,6 +312,7 @@ main :: proc() {
         fmt.eprintln("Cannot initialize static asset store.")
         return
     }
+
     // when ODIN_DEBUG {
     //     BASE_DIR :: "assets/"
     //     INDEX_NAME :: "index.html"

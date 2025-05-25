@@ -345,6 +345,9 @@ write_response :: proc(conn: ^Client_Connection) {
     }
 
     write(&conn.writer, CRLF)
+    if conn.response.body != nil {
+        write(&conn.writer, conn.response.body)
+    }
 }
 
 handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) {
@@ -371,13 +374,26 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) {
             write_response(conn)
             // TODO(louis): Improve detection of complete messages
             if conn.parser.message_length == conn.parser.offset {
-                connection_reset_noflags(conn)
+                free_all(conn.arena) 
+                conn.parser.offset = 0
+                conn.parser.prev_offset = 0
+                conn.parser.parser_state = .IncompleteHeader
+                conn.request.body = nil
+                conn.response.body = nil
+                header_map_reset(&conn.request.header_map)
+                header_map_reset(&conn.response.header_map)
                 break loop
             }
 
             assert(conn.parser.message_length > conn.parser.offset)
             memory_copy(conn.parser.buffer, conn.parser.buffer[conn.parser.message_length:conn.parser.offset])
-            connection_reset_with_offset_noflags(conn, conn.parser.offset - conn.parser.message_length)
+            conn.parser.offset = conn.parser.offset - conn.parser.message_length
+            conn.parser.prev_offset = 0
+            conn.parser.parser_state = .IncompleteHeader
+            conn.request.body = nil
+            conn.response.body = nil
+            header_map_reset(&conn.request.header_map)
+            header_map_reset(&conn.response.header_map)
         case .Error:
             conn.response.status_code = .Bad_Request
             header_map_insert_precomputed(
