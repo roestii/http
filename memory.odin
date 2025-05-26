@@ -2,10 +2,68 @@ package http
 
 import "base:runtime"
 
-u32_to_string :: proc(x: u32, arena: runtime.Allocator) -> (result: []u8) {
+Arena :: struct {
+    start_addr: uintptr,
+    len: uintptr,
+    offset: uintptr 
+}
+
+arena_free :: proc(arena: ^Arena) {
+    arena.offset = 0
+}
+
+arena_init :: proc(arena: ^Arena, start_addr: uintptr, len: uintptr) {
+    arena.start_addr = start_addr
+    arena.len = len
+    arena.offset = 0
+}
+
+arena_push_array_unchecked :: proc(arena: ^Arena, $Type: typeid, count: uintptr) -> (result: []Type) {
+    when ODIN_DEBUG {
+        assert(arena.offset+size_of(Type)*count <= arena.len)
+    }
+    ptr := arena.start_addr + arena.offset
+    result = ([^]Type)(ptr)[:count]
+    arena.offset += count*size_of(Type)
+    return
+}
+
+arena_push_array :: proc(arena: ^Arena, $Type: typeid, count: uintptr) -> (result: []Type, err: bool) {
+    if arena.offset+size_of(Type)*count > arena.len {
+        err = true
+        return
+    }
+
+    ptr := arena.start_addr + arena.offset
+    result = ([^]Type)(ptr)[:count]
+    arena.offset += count*size_of(Type)
+    return
+}
+
+arena_push_size :: proc(arena: ^Arena, size: uintptr) -> (result: uintptr, err: bool) {
+    if arena.offset+uintptr(size) > arena.len {
+        err = true
+        return
+    }
+
+    result = arena.start_addr + arena.offset
+    arena.offset += size
+    return
+}
+
+arena_push_size_unchecked :: proc(arena: ^Arena, size: uintptr) -> (result: uintptr) {
+    when ODIN_DEBUG {
+        assert(arena.offset+size <= arena.len)
+    }
+    result = arena.start_addr + arena.offset
+    arena.offset += size
+    return
+}
+
+u32_to_string :: proc(x: u32, arena: ^Arena) -> (result: []u8) {
     n := x
     if n == 0 {
-        result = make([]u8, 1, arena)
+        result = arena_push_array_unchecked(arena, u8, 1)
         result[0] = '0'
         return
     } 
@@ -17,7 +75,7 @@ u32_to_string :: proc(x: u32, arena: runtime.Allocator) -> (result: []u8) {
     }
 
     n = x
-    result = make([]u8, digits, arena)
+    result = arena_push_array_unchecked(arena, u8, uintptr(digits))
     #reverse for &c in result {
         c = u8(n % 10) + '0'
         assert(c >= '0' && c <= '9')

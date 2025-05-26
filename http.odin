@@ -14,7 +14,11 @@ CONN_RES_BUF_SIZE :: 2 * mem.Megabyte
 CONN_SCRATCH_SIZE :: 4 * mem.Megabyte // This includes the header map as well as the output buffer for compressed content
 MEM_PER_CONN :: size_of(Client_Connection) + CONN_REQ_BUF_SIZE + CONN_RES_BUF_SIZE + CONN_SCRATCH_SIZE
 NTHREADS :: 6
-MEMORY : u64 : NTHREADS * CONNS_PER_THREAD * MEM_PER_CONN
+
+MAX_ASSET_SIZE :: 1 * mem.Megabyte
+ASSET_CONTENT_MEMORY :: ASSET_COUNT * MAX_ASSET_SIZE
+ASSET_MEMORY :: ASSET_COUNT * size_of(Asset) + ASSET_CONTENT_MEMORY
+MEMORY : u64 : NTHREADS * 2 * CONNS_PER_THREAD * MEM_PER_CONN 
 BUCKET_COUNT :: 128
 
 Http_Header_Entry :: struct {
@@ -94,10 +98,14 @@ Http_Response :: struct {
     status_code: Http_Status_Code,
 }
 
+header_map_init_unchecked :: proc(header_map: ^Http_Header_Map, arena: ^Arena) {
+    header_map.buckets = arena_push_array_unchecked(arena, Http_Header_Entry, BMAX_ASSET_SIZE
+    header_map.count = 0
+}
+
 header_map_init :: proc(header_map: ^Http_Header_Map, arena: runtime.Allocator) {
-    using header_map
-    buckets = make([]Http_Header_Entry, BUCKET_COUNT, arena)
-    count = 0
+    header_map.buckets = make([]Http_Header_Entry, BUCKET_COUNT, arena)
+    header_map.count = 0
 }
 
 header_map_reset :: proc(header_map: ^Http_Header_Map) {
@@ -285,38 +293,37 @@ Connection_State :: enum {
     Close
 }
 
-handle_request :: proc(connection: ^Client_Connection, asset_store: ^Asset_Store) {
-    using connection
-    switch request.method {
+handle_request :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) {
+    switch conn.request.method {
     case .Post:
     case .Get:
         // TODO(louis): Verify that it is not possible to have a uri of length zero
-        content, asset_err := asset_store_get(asset_store, request.uri[1:])
+        content, asset_err := asset_store_get(asset_store, conn.request.uri[1:])
         if !asset_err {
-            response.body = content
-            content_length := u32_to_string(u32(len(content)), arena)
+            conn.response.body = content
+            content_length := u32_to_string(u32(len(content)), &conn.arena)
             err := header_map_insert_precomputed(
-                &response.header_map, 
+                &conn.response.header_map, 
                 CONTENT_LENGTH_LITERAL, 
                 content_length, 
                 CONTENT_LENGTH_HASH
             )
             assert(!err)
-            response.status_code = .OK
+            conn.response.status_code = .OK
         } else {
             // TODO(louis): We should probably consider reporting back that we should close the connection
-            response.status_code = .Not_Found
+            conn.response.status_code = .Not_Found
             err: bool
             // TODO(louis): These should not happen
             err = header_map_insert_precomputed(
-                &response.header_map, 
+                &conn.response.header_map, 
                 CONNECTION_LITERAL, 
                 CLOSE_LITERAL, 
                 CONNECTION_HASH
             )
             assert(!err)
             err = header_map_insert_precomputed(
-                &response.header_map, 
+                &conn.response.header_map, 
                 CONTENT_LENGTH_LITERAL, 
                 ZERO_LITERAL, 
                 CONTENT_LENGTH_HASH 
@@ -374,7 +381,7 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) {
             write_response(conn)
             // TODO(louis): Improve detection of complete messages
             if conn.parser.message_length == conn.parser.offset {
-                free_all(conn.arena) 
+                arena_free(&conn.arena) 
                 conn.parser.offset = 0
                 conn.parser.prev_offset = 0
                 conn.parser.parser_state = .IncompleteHeader

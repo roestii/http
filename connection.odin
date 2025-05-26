@@ -6,16 +6,16 @@ import "core:mem"
 import "core:fmt"
 
 Connection_Bits :: enum u8 {
-    READ = 1, // This tells the main loop that we want to read again from the connection
+    READ = 1,
     WRITE = 2, // This tells the main loop that we issued a response send call to the client
-    CLOSE = 3 // This tells the main loop that it should close the connection after it consumed the response write (this cannot be used in combination with READ)
+    CLOSE = 3 // This tells the main loop that it should close the connection after it consumed the response write
 }
 
 Connection_Flags :: bit_set[Connection_Bits; u32]
 
 Client_Connection :: struct {
     client_socket: Fd_Type,
-    arena: runtime.Allocator,
+    arena: Arena,
     parser: Http_Parser,
     request: Http_Request,
     writer: Writer,
@@ -66,7 +66,7 @@ Connection_Pool :: struct {
 
 connection_reset :: proc(conn: ^Client_Connection) {
     // NOTE(louis): This just sets the offset of the underlying arena to zero
-    free_all(conn.arena) 
+    arena_free(&conn.arena) 
     conn.parser.offset = 0
     conn.parser.prev_offset = 0
     conn.parser.parser_state = .IncompleteHeader
@@ -78,21 +78,49 @@ connection_reset :: proc(conn: ^Client_Connection) {
     header_map_reset(&conn.response.header_map)
 }
 
-pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocator, conn_arena: ^mem.Arena) {
-    pool.free_len = len 
+pool_init_arena :: proc(
+    pool: ^Connection_Pool, 
+    len: u32, 
+    arena: ^Arena
+) {
+    pool.free_len = len
     pool.used_len = 0
-    // TODO(louis): Take a look at the memory layout
-    pool.free = make([]Client_Connection, len, base_arena)
-    pool.used = make([]Client_Connection, len, base_arena)
+
+    //pool_size := 2*len*size_of(Client_Connection)+CONNS_PER_THREAD*(CONN_SCRATCH_SIZE+CONN_RES_BUF_SIZE+CONN_REQ_BUF_SIZE+2*BUCKET_COUNT*size_of(Http_Header_Entry))
+    //base_ptr_raw, alloc_err := mem.arena_alloc_bytes_non_zeroed(base_arena, pool_size)
+
+    //arena: Arena
+    //arena_init(&arena, base_ptr, pool_size)
+    pool.free = arena_push_array_unchecked(arena, Client_Connection, uintptr(len))
+    pool.used = arena_push_array_unchecked(arena, Client_Connection, uintptr(len))
     for &conn in pool.free {
-        conn.writer.buffer = make([]u8, CONN_RES_BUF_SIZE, base_arena)
-        conn.parser.buffer = make([]u8, CONN_REQ_BUF_SIZE, base_arena)
-        header_map_init(&conn.request.header_map, base_arena)
-        header_map_init(&conn.response.header_map, base_arena)
-        mem.arena_init(conn_arena, make([]u8, CONN_SCRATCH_SIZE, base_arena))
-        conn.arena = mem.arena_allocator(conn_arena)
+        conn.writer.buffer = arena_push_array_unchecked(arena, u8, CONN_RES_BUF_SIZE)
+        conn.parser.buffer = arena_push_array_unchecked(arena, u8, CONN_REQ_BUF_SIZE)
+        header_map_init_unchecked(&conn.request.header_map, arena)
+        header_map_init_unchecked(&conn.response.header_map, arena)
+        arena_init(
+            &conn.arena,
+            arena_push_size_unchecked(arena, CONN_SCRATCH_SIZE),
+            CONN_SCRATCH_SIZE
+        )
     }
 }
+
+//pool_init :: proc(pool: ^Connection_Pool, len: u32, base_arena: runtime.Allocator, conn_arena: ^mem.Arena) {
+//    pool.free_len = len 
+//    pool.used_len = 0
+//    // TODO(louis): Take a look at the memory layout
+//    pool.free = make([]Client_Connection, len, base_arena)
+//    pool.used = make([]Client_Connection, len, base_arena)
+//    for &conn in pool.free {
+//        conn.writer.buffer = make([]u8, CONN_RES_BUF_SIZE, base_arena)
+//        conn.parser.buffer = make([]u8, CONN_REQ_BUF_SIZE, base_arena)
+//        header_map_init(&conn.request.header_map, base_arena)
+//        header_map_init(&conn.response.header_map, base_arena)
+//        mem.arena_init(conn_arena, make([]u8, CONN_SCRATCH_SIZE, base_arena))
+//        conn.arena = mem.arena_allocator(conn_arena)
+//    }
+//}
 
 pool_acquire :: proc(pool: ^Connection_Pool, client_socket: Fd_Type) -> (idx: u32, err: bool) {
     if pool.free_len == 0 {

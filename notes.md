@@ -8,3 +8,5 @@ infinite loop with parametric polymorphism on functions?
 
 /root/personal/http/http_linux.odin(152:35) Error: Undeclared name: pool_aquire
         conn_idx, pool_err := pool_aquire(conn_pool, client_fd)
+
+odin's runtime allocator is pretty slow

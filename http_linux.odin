@@ -21,7 +21,7 @@ send_tcp :: proc(fd: linux.Fd, buffer: []u8) -> (bytes_written: int, errno: linu
 
 IO_Uring_Command :: bit_field u64 {
     conn_idx: u32 | 32,
-    command: Connection_Bits | 8
+    command: io_uring.IO_Uring_Op | 8
 }
 
 server_loop_epoll :: proc(
@@ -258,7 +258,7 @@ server_loop_io_uring :: proc(
                             pool_release(conn_pool, conn_idx)
                         }
                     } else if .CLOSE in conn.flags {
-                        assert(.WRITE not_in conn.flags)
+                        assert(.READ not_in conn.flags)
                         linux.close(conn.client_socket)
                         connection_reset(conn)
                         pool_release(conn_pool, conn_idx)
@@ -287,27 +287,40 @@ when IO_URING {
     server_loop :: server_loop_epoll
 }
 
+linux_read_time :: proc() -> (result: u64) {
+    ts, errno := linux.clock_gettime(.MONOTONIC)
+    assert(errno == .NONE)
+    result = u64(1_000_000_000) * u64(ts.time_sec) + u64(ts.time_nsec)
+    return
+}
+
 main :: proc() {
+    start_startup := linux_read_time() 
     socket, err := init_socket()
     if err != nil {
         fmt.eprintln("Unable to init socket: ", err)
         return
     } 
 
-    base_memory: mem.Arena
-    mem.arena_init(&base_memory, make([]u8, MEMORY, context.temp_allocator))
-    defer free_all()
-    base_arena := mem.arena_allocator(&base_memory)
+
+    base_memory: Arena
+    arena_init(
+        &base_memory,
+        uintptr(raw_data(make([]u8, MEMORY, context.temp_allocator))),
+        uintptr(MEMORY)
+    )
+
     conn_pools: [NTHREADS]Connection_Pool
     conn_arenas: [NTHREADS]mem.Arena
     for idx in 0..<len(conn_pools) {
         conn_pool := &conn_pools[idx]
         conn_arena := &conn_arenas[idx]
-        pool_init(conn_pool, CONNS_PER_THREAD, base_arena, conn_arena)
+        pool_init_arena(conn_pool, CONNS_PER_THREAD, &base_memory)
     }
 
+
     asset_store: Asset_Store
-    asset_store_err := asset_store_init(&asset_store, base_arena)
+    asset_store_err := asset_store_init(&asset_store, &base_memory)
     if asset_store_err {
         fmt.eprintln("Cannot initialize static asset store.")
         return
@@ -325,6 +338,9 @@ main :: proc() {
     // TODO(louis): Remove this, this is purely for debugging purposes
 
     // TODO(louis): This code has to go to the threads
+
+    elapsed_startup := linux_read_time() - start_startup
+    fmt.printfln("Startup time: %d ms", elapsed_startup/1_000_000)
     server_loop(socket, &conn_pools[0], &asset_store)
 }
 
