@@ -264,7 +264,11 @@ IO_Uring_Sqe :: struct {
 }
 
 sys_io_uring_setup :: proc "contextless" (entry_count: u32, params: ^IO_Uring_Params) -> (result: int) {
-    result = int(intrinsics.syscall(linux.SYS_io_uring_setup, uintptr(entry_count), uintptr(params)))
+    result = int(intrinsics.syscall(
+        linux.SYS_io_uring_setup, 
+        uintptr(entry_count), 
+        uintptr(params)
+    ))
     return
 }
 

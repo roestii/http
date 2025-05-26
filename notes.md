@@ -10,3 +10,4 @@ infinite loop with parametric polymorphism on functions?
         conn_idx, pool_err := pool_aquire(conn_pool, client_fd)
 
 odin's runtime allocator is pretty slow
+odin mmap with linux api doesn't really work

@@ -99,7 +99,7 @@ Http_Response :: struct {
 }
 
 header_map_init_unchecked :: proc(header_map: ^Http_Header_Map, arena: ^Arena) {
-    header_map.buckets = arena_push_array_unchecked(arena, Http_Header_Entry, BMAX_ASSET_SIZE
+    header_map.buckets = arena_push_array_unchecked(arena, Http_Header_Entry, BUCKET_COUNT)
     header_map.count = 0
 }
 

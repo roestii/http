@@ -95,7 +95,11 @@ pool_init_arena :: proc(
     pool.used = arena_push_array_unchecked(arena, Client_Connection, uintptr(len))
     for &conn in pool.free {
         conn.writer.buffer = arena_push_array_unchecked(arena, u8, CONN_RES_BUF_SIZE)
+        conn.writer.offset = 0
         conn.parser.buffer = arena_push_array_unchecked(arena, u8, CONN_REQ_BUF_SIZE)
+        conn.parser.offset = 0
+        conn.parser.prev_offset = 0
+        conn.parser.parser_state = .IncompleteHeader
         header_map_init_unchecked(&conn.request.header_map, arena)
         header_map_init_unchecked(&conn.response.header_map, arena)
         arena_init(
@@ -103,6 +107,7 @@ pool_init_arena :: proc(
             arena_push_size_unchecked(arena, CONN_SCRATCH_SIZE),
             CONN_SCRATCH_SIZE
         )
+        conn.flags = {}
     }
 }
 

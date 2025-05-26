@@ -2,13 +2,16 @@ package http
 
 import "core:fmt"
 import "core:sys/linux"
+import "core:sys/posix"
 import "core:mem"
 import "core:net"
 import "io_uring"
 
 SERVER_SOCKET_USER_DATA :: transmute(u64)i64(-1)
 
-IO_URING :: #config(IO_URING, true)
+// TODO(louis): Maybe we have to use non blocking sockets
+
+IO_URING :: #config(IO_URING, false)
 Fd_Type :: linux.Fd
 Errno :: linux.Errno
 // TODO(louis): Should we consider moving the write of the response to the ring as well?
@@ -83,7 +86,6 @@ server_loop_epoll :: proc(
                     fmt.eprintln("Error while adding client connection to epoll.")
                     return
                 }
-
             } else {
                 // TODO(louis): Check whether the client closed the connection as kqueue will notify us 
                 // when the connection is closed (we should verify that as well)
@@ -164,16 +166,20 @@ server_loop_io_uring :: proc(
 
     // TODO(louis): Implement adding to the submission queue and reading from the 
     // completion queue (keep in mind to check the sq_ring flags)
-    errno = io_uring.submit_to_sq(
+
+    client_addr: linux.Sock_Addr_In
+    client_addr_len := size_of(client_addr)
+    errno = io_uring.submit_to_sq_accept(
         &ring, 
-        linux.Fd(server_socket), 
-        .ACCEPT, 
-        nil, 
-        SERVER_SOCKET_USER_DATA
+        server_socket, 
+        &client_addr,
+        &client_addr_len,
+        SERVER_SOCKET_USER_DATA,
+        {}// {.MULTISHOT}
     )
 
     if errno != .NONE {
-        fmt.eprintln("Unable to submit accept call to submission queue.")
+        fmt.eprintln("Cannot add multishot accept to submission queue", errno)
         return
     }
 
@@ -185,12 +191,12 @@ server_loop_io_uring :: proc(
                 conn_idx, pool_err := pool_acquire(conn_pool, client_fd)
                 if !pool_err {
                     conn := &conn_pool.used[conn_idx]
-                    errno = io_uring.submit_to_sq(
+                    errno = io_uring.submit_to_sq_recv(
                         &ring, 
-                        linux.Fd(client_fd), 
-                        .READ, 
+                        client_fd, 
                         conn.parser.buffer,
-                        u64(conn_idx)
+                        u64(conn_idx),
+                        {}
                     )
 
                     // TODO(louis): Should we close the connection when our cq overflows?
@@ -202,6 +208,9 @@ server_loop_io_uring :: proc(
                 } else {
                     linux.close(client_fd)
                 }
+            } else {
+                fmt.eprintln("Cannot accept on server socket", linux.Errno(-cqe.res))
+                return
             }
         } else {
             // TODO(louis): Verify that the user data cannot collide
@@ -211,7 +220,7 @@ server_loop_io_uring :: proc(
             conn := &conn_pool.used[conn_idx]
             if cqe.res >= 0 {
                 #partial switch cmd {
-                case .READ:
+                case .RECV:
                     conn.parser.prev_offset = conn.parser.offset
                     conn.parser.offset += u32(cqe.res)
                     // TODO(louis): We don't read again if the connection should be kept alive. That is a bug
@@ -219,14 +228,14 @@ server_loop_io_uring :: proc(
                     if .READ in conn.flags {
                         cmd := IO_Uring_Command {
                             conn_idx = conn_idx,
-                            command = .READ
+                            command = .RECV
                         }
-                        errno = io_uring.submit_to_sq(
+                        errno = io_uring.submit_to_sq_recv(
                             &ring, 
                             linux.Fd(conn.client_socket), 
-                            .READ, 
-                            conn.parser.buffer,
-                            u64(cmd)
+                            conn.parser.buffer[conn.parser.offset:],
+                            u64(cmd),
+                            {}
                         )
 
                         // TODO(louis): Should we close the connection when our cq overflows?
@@ -241,14 +250,14 @@ server_loop_io_uring :: proc(
                     if .WRITE in conn.flags {
                         cmd := IO_Uring_Command {
                             conn_idx = conn_idx,
-                            command = .WRITE
+                            command = .SEND
                         }
-                        errno = io_uring.submit_to_sq(
+                        errno = io_uring.submit_to_sq_send(
                             &ring, 
                             linux.Fd(conn.client_socket), 
-                            .WRITE, 
                             conn.writer.buffer[:conn.writer.offset],
-                            u64(cmd)
+                            u64(cmd),
+                            {.NOSIGNAL}
                         )
 
                         // TODO(louis): Should we close the connection when our cq overflows?
@@ -303,10 +312,20 @@ main :: proc() {
     } 
 
 
+    base_ptr, base_memory_err := linux.mmap(
+        0, uint(MEMORY), {.READ, .WRITE}, 
+        {.PRIVATE, .ANONYMOUS}, -1, 0
+    )
+    if base_memory_err != .NONE {
+        fmt.eprintln("Failed to acquire base memory")
+        return
+    }
+    // base_ptr = posix.mmap(rawptr(uintptr(0)), uint(MEMORY), {.READ, .WRITE}, {.PRIVATE, .ANONYMOUS }, -1, 0)
+
     base_memory: Arena
     arena_init(
         &base_memory,
-        uintptr(raw_data(make([]u8, MEMORY, context.temp_allocator))),
+        uintptr(base_ptr),
         uintptr(MEMORY)
     )
 
@@ -340,7 +359,7 @@ main :: proc() {
     // TODO(louis): This code has to go to the threads
 
     elapsed_startup := linux_read_time() - start_startup
-    fmt.printfln("Startup time: %d ms", elapsed_startup/1_000_000)
+    fmt.printfln("Startup time: %.2f μs", f64(elapsed_startup)/1_000.0)
     server_loop(socket, &conn_pools[0], &asset_store)
 }
 
