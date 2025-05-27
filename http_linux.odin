@@ -120,6 +120,7 @@ server_loop_epoll :: proc(
                         handle_connection(conn, asset_store)
                         if .WRITE in conn.flags {
                             bytes_written, send_err := send_tcp(conn.client_socket, conn.writer.buffer[:conn.writer.offset])
+                            conn.writer.offset = 0
                             if send_err != .NONE {
                                 epoll_err := linux.epoll_ctl(efd, .DEL, linux.Fd(conn.client_socket), nil)
                                 if epoll_err != .NONE {
@@ -175,7 +176,7 @@ server_loop_io_uring :: proc(
         &client_addr,
         &client_addr_len,
         SERVER_SOCKET_USER_DATA,
-        {}// {.MULTISHOT}
+        {.MULTISHOT}
     )
 
     if errno != .NONE {
@@ -191,11 +192,15 @@ server_loop_io_uring :: proc(
                 conn_idx, pool_err := pool_acquire(conn_pool, client_fd)
                 if !pool_err {
                     conn := &conn_pool.used[conn_idx]
+                    cmd := IO_Uring_Command {
+                        conn_idx = conn_idx,
+                        command = .RECV
+                    }
                     errno = io_uring.submit_to_sq_recv(
                         &ring, 
                         client_fd, 
                         conn.parser.buffer,
-                        u64(conn_idx),
+                        u64(cmd),
                         {}
                     )
 
@@ -272,11 +277,13 @@ server_loop_io_uring :: proc(
                         connection_reset(conn)
                         pool_release(conn_pool, conn_idx)
                     }
-                case .WRITE:
+                case .SEND:
                     if .CLOSE in conn.flags {
                         linux.close(conn.client_socket)
                         connection_reset(conn)
                         pool_release(conn_pool, conn_idx)
+                    } else {
+                        conn.writer.offset = 0
                     }
                 case:
                     assert(false)

@@ -13,18 +13,19 @@ SQ_THREAD_IDLE :: 10000
 Completion_Ring :: struct {
     tail: ^u32,
     head: ^u32,
-    mask: ^u32,
     // flags: ^u32,
     entries: []IO_Uring_Cqe,
+    mask: u32,
 }
 
 Submission_Ring :: struct {
     tail: ^u32,
     head: ^u32,
-    mask: ^u32,
+    array: ^u32,
     // These flags have to be checked for NEED_WAKEUP
     flags: ^IO_Uring_SQ_Flags,
     entries: []IO_Uring_Sqe,
+    mask: u32,
 }
 
 IO_Ring :: struct {
@@ -33,10 +34,30 @@ IO_Ring :: struct {
     cring: Completion_Ring,
 }
 
+get_sqe :: #force_inline proc(ring: ^IO_Ring) -> (sqe: ^IO_Uring_Sqe, tail: u32) {
+    head := ring.sring.head^;
+    mask := ring.sring.mask;
+    tail = intrinsics.atomic_load(ring.sring.tail);
+    index := tail & mask;
+    if tail - head >= u32(len(ring.sring.entries)) {
+        enter_flags: IO_Uring_Enter_Flags = {.SQ_WAIT}
+        sys_io_uring_enter(
+            u32(ring.ring_fd), 
+            0, 
+            0, 
+            transmute(u32)enter_flags, 
+            nil
+            //([^]Sig_Set)(uintptr(0))
+        )
+    }
+
+    sqe = &ring.sring.entries[index]
+    return
+}
+
 setup :: proc() -> (result: IO_Ring, err: linux.Errno) {
     params: IO_Uring_Params
-    params.flags = {.SQPOLL}
-    fmt.println("flags", transmute(u32)params.flags)
+    params.flags = {.SQPOLL, .NO_SQARRAY}
     params.sq_thread_idle = SQ_THREAD_IDLE
     result.ring_fd = linux.Fd(sys_io_uring_setup(ENTRY_COUNT, &params))
     if result.ring_fd < 0 {
@@ -78,16 +99,35 @@ setup :: proc() -> (result: IO_Ring, err: linux.Errno) {
         return
     }
 
-    result.sring.tail = transmute(^u32)(uintptr(sq_ptr) + uintptr(params.sq_off.tail))
-    result.sring.mask = transmute(^u32)(uintptr(sq_ptr) + uintptr(params.sq_off.ring_mask))
-    result.sring.flags = transmute(^IO_Uring_SQ_Flags)(uintptr(sq_ptr) + uintptr(params.sq_off.flags))
-    result.sring.entries = (transmute([^]IO_Uring_Sqe)sq_entries_raw)[:params.sq_entries]
+    result.sring.tail = (^u32)(uintptr(sq_ptr) + uintptr(params.sq_off.tail))
+    result.sring.head = (^u32)(uintptr(sq_ptr) + uintptr(params.sq_off.head))
+    result.sring.mask = (^u32)(uintptr(sq_ptr) + uintptr(params.sq_off.ring_mask))^
+    // result.sring.array = (^u32)(uintptr(sq_ptr) + uintptr(params.sq_off.array))
+    result.sring.flags = (^IO_Uring_SQ_Flags)(uintptr(sq_ptr) + uintptr(params.sq_off.flags))
+    result.sring.entries = ([^]IO_Uring_Sqe)(sq_entries_raw)[:params.sq_entries]
 
-    result.cring.tail = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.tail))
-    result.cring.head = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.head))
-    result.cring.mask = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.ring_mask))
+    result.cring.tail = (^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.tail))
+    result.cring.head = (^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.head))
+    result.cring.mask = (^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.ring_mask))^
     // result.cring_flags = transmute(^u32)(uintptr(cq_ptr) + uintptr(params.cq_off.flags))
-    result.cring.entries = (transmute([^]IO_Uring_Cqe)(uintptr(cq_ptr) + uintptr(params.cq_off.cqes)))[:params.cq_entries]
+    result.cring.entries = (([^]IO_Uring_Cqe)(uintptr(cq_ptr) + uintptr(params.cq_off.cqes)))[:params.cq_entries]
+    return
+}
+
+submit :: #force_inline proc(ring: ^IO_Ring, tail: u32) -> (err: linux.Errno) {
+    intrinsics.atomic_store(ring.sring.tail, tail + 1)
+    sring_flags := intrinsics.atomic_load(ring.sring.flags)
+    if .NEED_WAKEUP in sring_flags {
+        enter_flags: IO_Uring_Enter_Flags = {.SQ_WAKEUP}
+        // TODO(louis): Error handling
+        err = linux.Errno(sys_io_uring_enter(
+            u32(ring.ring_fd), 
+            0, 
+            0, 
+            transmute(u32)enter_flags,
+            nil
+        ))
+    }
     return
 }
 
@@ -98,39 +138,20 @@ submit_to_sq_send :: proc(
     user_data: u64, 
     flags: bit_set[linux.Socket_Msg_Bits; i32]
 ) -> (err: linux.Errno) {
-    sring_flags := intrinsics.atomic_load(ioring.sring.flags)
-    if .CQ_OVERFLOW in sring_flags {
-        err = .EBUSY 
-        return
-    }
+    //sring_flags := intrinsics.atomic_load(ioring.sring.flags)
+    //if .CQ_OVERFLOW in sring_flags {
+    //    err = .EBUSY 
+    //    return
+    //}
 
-    tail := intrinsics.atomic_load(ioring.sring.tail)
-    mask := ioring.sring.mask^
-    sqe := &ioring.sring.entries[tail & mask]
-
+    sqe, tail := get_sqe(ioring)
     sqe.fd = i32(fd)
     sqe.addr = u64(uintptr(raw_data(buffer)))
     sqe.len = u32(len(buffer))
     sqe.user_data = user_data
     sqe.opcode = .SEND
     sqe.msg_flags = transmute(u32)flags
-    // The previous stores to the sqe cannot be reordered past the store to the tail
-    // TODO(louis): Look at the codegen for the atomic store, in reality we probably just need 
-    // a fence here
-    intrinsics.atomic_store(ioring.sring.tail, tail + 1)
-    sring_flags = intrinsics.atomic_load(ioring.sring.flags)
-    if .NEED_WAKEUP in sring_flags {
-        enter_flags: IO_Uring_Enter_Flags = {.SQ_WAKEUP, .SQ_WAIT}
-        err = linux.Errno(sys_io_uring_enter(
-            u32(ioring.ring_fd), 
-            0, 
-            0, 
-            transmute(u32)enter_flags, 
-            ([^]Sig_Set)(uintptr(0)))
-        )
-        // NOTE(louis): No return needed as there is no code following this
-    }
-
+    err = submit(ioring, tail)
     return
 }
 
@@ -141,40 +162,14 @@ submit_to_sq_recv :: proc(
     user_data: u64,
     flags: bit_set[linux.Socket_Msg_Bits; i32]
 ) -> (err: linux.Errno) {
-    sring_flags := intrinsics.atomic_load(ioring.sring.flags)
-    if .CQ_OVERFLOW in sring_flags {
-        err = .EBUSY 
-        return
-    }
-
-    tail := intrinsics.atomic_load(ioring.sring.tail)
-    fmt.println("Submitting recv call", tail)
-    mask := ioring.sring.mask^
-    sqe := &ioring.sring.entries[tail & mask]
-
+    sqe, tail := get_sqe(ioring)
     sqe.fd = i32(fd)
     sqe.addr = u64(uintptr(raw_data(buffer)))
     sqe.len = u32(len(buffer))
     sqe.user_data = user_data
     sqe.opcode = .RECV
     sqe.msg_flags = transmute(u32)flags
-    // The previous stores to the sqe cannot be reordered past the store to the tail
-    // TODO(louis): Look at the codegen for the atomic store, in reality we probably just need 
-    // a fence here
-    intrinsics.atomic_store(ioring.sring.tail, tail + 1)
-    sring_flags = intrinsics.atomic_load(ioring.sring.flags)
-    if .NEED_WAKEUP in sring_flags {
-        enter_flags: IO_Uring_Enter_Flags = {.SQ_WAKEUP, .SQ_WAIT}
-        err = linux.Errno(sys_io_uring_enter(
-            u32(ioring.ring_fd), 
-            0, 
-            0, 
-            transmute(u32)enter_flags, 
-            ([^]Sig_Set)(uintptr(0)))
-        )
-        // NOTE(louis): No return needed as there is no code following this
-    }
-
+    err = submit(ioring, tail)
     return
 }
 
@@ -190,16 +185,7 @@ submit_to_sq_accept :: proc(
     user_data: u64,
     accept_flags: bit_set[Accept_Bits; u16]
 ) -> (err: linux.Errno) {
-    sring_flags := intrinsics.atomic_load(ioring.sring.flags)
-    if .CQ_OVERFLOW in sring_flags {
-        err = .EBUSY 
-        return
-    }
-
-    tail := intrinsics.atomic_load(ioring.sring.tail)
-    mask := ioring.sring.mask^
-    sqe := &ioring.sring.entries[tail & mask]
-
+    sqe, tail := get_sqe(ioring)
     sqe.fd = i32(fd)
     sqe.addr = u64(uintptr(client_addr))
     sqe.len = 0
@@ -208,28 +194,12 @@ submit_to_sq_accept :: proc(
     sqe.opcode = .ACCEPT
     sqe.ioprio = transmute(u16)accept_flags
     sqe.flags = {.ASYNC}
-    // The previous stores to the sqe cannot be reordered past the store to the tail
-    // TODO(louis): Look at the codegen for the atomic store, in reality we probably just need 
-    // a fence here
-    intrinsics.atomic_store(ioring.sring.tail, tail + 1)
-    sring_flags = intrinsics.atomic_load(ioring.sring.flags)
-    if .NEED_WAKEUP in sring_flags {
-        enter_flags: IO_Uring_Enter_Flags = {.SQ_WAKEUP, .SQ_WAIT}
-        err = linux.Errno(sys_io_uring_enter(
-            u32(ioring.ring_fd), 
-            0, 
-            0, 
-            transmute(u32)enter_flags, 
-            transmute([^]Sig_Set)uintptr(0))
-        )
-        // NOTE(louis): No return needed as there is no code following this
-    }
-
+    err = submit(ioring, tail)
     return
 }
 
 read_from_cq :: proc(ioring: ^IO_Ring) -> (result: IO_Uring_Cqe) {
-    mask := ioring.cring.mask^
+    mask := ioring.cring.mask
     // TODO(louis): Look at the codegen for the atomic load, in reality we probably just need 
     // a fence here
     // All previous stores should be visible here
@@ -241,7 +211,6 @@ read_from_cq :: proc(ioring: ^IO_Ring) -> (result: IO_Uring_Cqe) {
     }
 
     result = ioring.cring.entries[head & mask]
-    fmt.println("Got something: ", result.res)
     // Make the store visible to the kernel thread
     intrinsics.atomic_store(ioring.cring.head, head + 1)
     return

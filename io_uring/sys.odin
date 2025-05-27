@@ -125,6 +125,43 @@ IO_Uring_Setup_Bits :: enum u32 {
     ATTACH_WQ = 5,	/* attach to existing wq */
     R_DISABLED = 6,	/* start with ring disabled */
     SUBMIT_ALL = 7,	/* continue submit on error */
+    COOP_TASKRUN = 8,
+    /*
+     * If COOP_TASKRUN is set, get notified if task work is available for
+     * running and a kernel transition would be needed to run it. This sets
+     * IORING_SQ_TASKRUN in the sq ring flags. Not valid with COOP_TASKRUN.
+     */
+    TASKRUN_FLAG = 9,
+    SQE128	 = 10, /* SQEs are 128 byte */
+    CQE32	 = 11, /* CQEs are 32 byte */
+    /*
+     * Only one task is allowed to submit requests
+     */
+    SINGLE_ISSUER = 12,
+
+    /*
+     * Defer running task work to get events.
+     * Rather than running bits of task work whenever the task transitions
+     * try to do it just before it is needed.
+     */
+    DEFER_TASKRUN = 13,
+
+    /*
+     * Application provides the memory for the rings
+     */
+    NO_MMAP	 = 14,
+
+    /*
+     * Register the ring fd in itself for use with
+     * IORING_REGISTER_USE_REGISTERED_RING; return a registered fd index rather
+     * than an fd.
+     */
+    REGISTERED_FD_ONLY = 15,
+
+    /*
+     * Removes indirection through the SQ index array.
+     */
+    NO_SQARRAY	 = 16,
 }
 
 IO_Uring_Setup_Flags :: bit_set[IO_Uring_Setup_Bits; u32]
@@ -296,4 +333,3 @@ sys_io_uring_enter :: proc "contextless" (fd: u32, to_submit: u32, min_complete:
     ))
     return
 }
-

@@ -389,6 +389,7 @@ handle_connection :: proc(conn: ^Client_Connection, asset_store: ^Asset_Store) {
                 conn.response.body = nil
                 header_map_reset(&conn.request.header_map)
                 header_map_reset(&conn.response.header_map)
+                conn.flags |= {.READ}
                 break loop
             }
 

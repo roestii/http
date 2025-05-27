@@ -102,6 +102,8 @@ pool_init_arena :: proc(
         conn.parser.parser_state = .IncompleteHeader
         header_map_init_unchecked(&conn.request.header_map, arena)
         header_map_init_unchecked(&conn.response.header_map, arena)
+        conn.request.body = nil
+        conn.response.body = nil
         arena_init(
             &conn.arena,
             arena_push_size_unchecked(arena, CONN_SCRATCH_SIZE),
