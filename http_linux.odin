@@ -11,7 +11,7 @@ SERVER_SOCKET_USER_DATA :: transmute(u64)i64(-1)
 
 // TODO(louis): Maybe we have to use non blocking sockets
 
-IO_URING :: #config(IO_URING, false)
+IO_URING :: #config(IO_URING, true)
 Fd_Type :: linux.Fd
 Errno :: linux.Errno
 // TODO(louis): Should we consider moving the write of the response to the ring as well?
@@ -70,7 +70,9 @@ server_loop_epoll :: proc(
                     return
                 }
 
-                conn_idx, pool_err := pool_acquire(conn_pool, client)
+                conn_idx, pool_err := pool_acquire(conn_pool)
+                conn := &conn_pool.conns[conn_idx]
+                conn.client_socket = client
                 if pool_err {
                     fmt.eprintln("No free connection slots available")
                     return
@@ -93,7 +95,7 @@ server_loop_epoll :: proc(
                 // TODO(louis): Somehow we free the connection multiple times, that should not happen...
                 // Something is really broken, test this further...
                 conn_idx := event.data.u32
-                conn: ^Client_Connection = &conn_pool.used[conn_idx]
+                conn := &conn_pool.conns[conn_idx]
                 if .HUP in event.events || .ERR in event.events {
                     linux.close(conn.client_socket)
                     connection_reset(conn)
@@ -189,9 +191,10 @@ server_loop_io_uring :: proc(
         if cqe.user_data == SERVER_SOCKET_USER_DATA {
             if cqe.res >= 0 {
                 client_fd := linux.Fd(cqe.res)
-                conn_idx, pool_err := pool_acquire(conn_pool, client_fd)
+                conn_idx, pool_err := pool_acquire(conn_pool)
                 if !pool_err {
-                    conn := &conn_pool.used[conn_idx]
+                    conn := &conn_pool.conns[conn_idx]
+                    conn.client_socket = client_fd
                     cmd := IO_Uring_Command {
                         conn_idx = conn_idx,
                         command = .RECV
@@ -204,7 +207,6 @@ server_loop_io_uring :: proc(
                         {}
                     )
 
-                    // TODO(louis): Should we close the connection when our cq overflows?
                     if errno != .NONE {
                         linux.close(conn.client_socket)
                         connection_reset(conn)
@@ -222,13 +224,12 @@ server_loop_io_uring :: proc(
             ioring_cmd := IO_Uring_Command(cqe.user_data)
             conn_idx := ioring_cmd.conn_idx
             cmd := ioring_cmd.command
-            conn := &conn_pool.used[conn_idx]
+            conn := &conn_pool.conns[conn_idx]
             if cqe.res >= 0 {
                 #partial switch cmd {
                 case .RECV:
                     conn.parser.prev_offset = conn.parser.offset
                     conn.parser.offset += u32(cqe.res)
-                    // TODO(louis): We don't read again if the connection should be kept alive. That is a bug
                     handle_connection(conn, asset_store)
                     if .READ in conn.flags {
                         cmd := IO_Uring_Command {

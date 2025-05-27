@@ -24,10 +24,9 @@ Client_Connection :: struct {
 }
 
 Connection_Pool :: struct {
-    free: []Client_Connection,
-    used: []Client_Connection,
+    conns: []Client_Connection,
+    free: []u32,
     free_len: u32,
-    used_len: u32,
 }
 
 // connection_reset_with_offset_noflags :: proc(conn: ^Client_Connection, offset: u32) {
@@ -84,16 +83,13 @@ pool_init_arena :: proc(
     arena: ^Arena
 ) {
     pool.free_len = len
-    pool.used_len = 0
+    pool.free = arena_push_array_unchecked(arena, u32, uintptr(len))
+    pool.conns = arena_push_array_unchecked(arena, Client_Connection, uintptr(len)) 
+    for i in 0..<len {
+        pool.free[i] = i
+    }
 
-    //pool_size := 2*len*size_of(Client_Connection)+CONNS_PER_THREAD*(CONN_SCRATCH_SIZE+CONN_RES_BUF_SIZE+CONN_REQ_BUF_SIZE+2*BUCKET_COUNT*size_of(Http_Header_Entry))
-    //base_ptr_raw, alloc_err := mem.arena_alloc_bytes_non_zeroed(base_arena, pool_size)
-
-    //arena: Arena
-    //arena_init(&arena, base_ptr, pool_size)
-    pool.free = arena_push_array_unchecked(arena, Client_Connection, uintptr(len))
-    pool.used = arena_push_array_unchecked(arena, Client_Connection, uintptr(len))
-    for &conn in pool.free {
+    for &conn in pool.conns {
         conn.writer.buffer = arena_push_array_unchecked(arena, u8, CONN_RES_BUF_SIZE)
         conn.writer.offset = 0
         conn.parser.buffer = arena_push_array_unchecked(arena, u8, CONN_REQ_BUF_SIZE)
@@ -129,37 +125,25 @@ pool_init_arena :: proc(
 //    }
 //}
 
-pool_acquire :: proc(pool: ^Connection_Pool, client_socket: Fd_Type) -> (idx: u32, err: bool) {
+pool_acquire :: proc(pool: ^Connection_Pool) -> (conn_idx: u32, err: bool) {
     if pool.free_len == 0 {
         err = true
         return
     }
 
     pool.free_len -= 1
-    conn := pool.free[pool.free_len]
-    conn.client_socket = client_socket
-    pool.used[pool.used_len] = conn
-    idx = pool.used_len
-    pool.used_len += 1
+    conn_idx = pool.free[pool.free_len]
     /* when ODIV_DEBUG {
         fmt.println("Acquiring ", idx)
     } */
     return
 }
 
-pool_release :: proc(pool: ^Connection_Pool, idx: u32/*,loc := #caller_location*/) {
+pool_release :: proc(pool: ^Connection_Pool, conn_idx: u32/*,loc := #caller_location*/) {
     /* when ODIN_DEBUG {
         fmt.printfln("Releasing connection %d from {:v}", idx, loc)
     } */
-    assert(pool.used_len > 0)
-    conn := pool.used[idx]
-    pool.free[pool.free_len] = conn
-
-    if idx < pool.used_len - 1 {
-        last := pool.used[pool.used_len - 1]
-        pool.used[idx] = last 
-    }
-
+    assert(pool.free_len < u32(len(pool.free)))
+    pool.free[pool.free_len] = conn_idx
     pool.free_len += 1
-    pool.used_len -= 1
 }
